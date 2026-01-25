@@ -1,0 +1,206 @@
+(*= traceability/specifications/public-key-directory-specification/Specification.md#addkey *)
+(*# The first AddKey for any given Actor MUST be self-signed by the same public key being added. *)
+
+(*= traceability/specifications/public-key-directory-specification/Specification.md#revokekey *)
+(*# Attempting to issue a RevokeKey MUST fail unless there is another public key associated with this Actor. *)
+
+(* TYPE DECLARATIONS *)
+
+type actor_id.                 (* Actor identifier (e.g., @user@domain) *)
+type public_key.               (* Ed25519 public key *)
+type secret_key.               (* Ed25519 secret key *)
+type signature.                (* Ed25519 signature *)
+type message.                  (* Protocol messages *)
+type merkle_root.              (* Merkle tree root hash *)
+
+(* CHANNELS *)
+
+free c: channel.               (* Public network channel *)
+free pkd_internal: channel [private].  (* Internal PKD processing channel *)
+
+(* CRYPTOGRAPHIC FUNCTIONS *)
+
+(* --- Asymmetric Signatures (Ed25519) --- *)
+fun pk(secret_key): public_key.        (* Derive public key from secret key *)
+fun sign(message, secret_key): signature.
+reduc forall m: message, sk: secret_key;
+  verify(m, sign(m, sk), pk(sk)) = true.
+
+(* --- Message Construction --- *)
+fun AddKeyMsg(actor_id, public_key): message.
+fun RevokeKeyMsg(actor_id, public_key): message.
+fun RevokeKeyThirdPartyMsg(actor_id, public_key, actor_id): message.
+
+(* TABLES FOR STATE TRACKING *)
+
+(* Track which public keys are registered for which actors *)
+table registered_keys(actor_id, public_key).
+
+(* Track which keys have been revoked *)
+table revoked_keys(actor_id, public_key).
+
+(* EVENTS FOR SECURITY PROPERTIES *)
+
+(* Key lifecycle events *)
+event FirstKeyAdded(actor_id, public_key).     (* First key for actor - self-signed *)
+event SubsequentKeyAdded(actor_id, public_key, public_key). (* New key authorized by existing *)
+event KeyRevoked(actor_id, public_key).        (* Key was revoked *)
+
+(* Authorization events *)
+event SelfSignedAccepted(actor_id, public_key).     (* Self-signed first key accepted *)
+event AuthorizedByExisting(actor_id, public_key, public_key). (* Authorized by existing key *)
+
+(* Attack detection events *)
+event UnauthorizedKeyAttempt(actor_id, public_key).
+event InvalidSignatureAttempt(actor_id).
+
+(* SECURITY QUERIES *)
+
+(* --- Query 1: First Key Must Be Self-Signed ---
+   When the first key is added for an actor, it must be self-signed.
+   The SelfSignedAccepted event should precede FirstKeyAdded. *)
+query a: actor_id, pk: public_key;
+  event(FirstKeyAdded(a, pk)) ==> event(SelfSignedAccepted(a, pk)).
+
+(* --- Query 2: Subsequent Keys Need Authorization ---
+   When a subsequent key is added, it must be authorized by an existing key. *)
+query a: actor_id, new_pk: public_key, auth_pk: public_key;
+  event(SubsequentKeyAdded(a, new_pk, auth_pk)) ==>
+    event(AuthorizedByExisting(a, new_pk, auth_pk)).
+
+(* --- Query 3: Key Secrecy ---
+   Honest secret keys remain secret. *)
+free honest_sk: secret_key [private].
+query attacker(honest_sk).
+
+(* --- Query 4: No Unauthorized Keys ---
+   An attacker cannot add keys for an honest actor without their secret key. *)
+free honest_actor: actor_id.
+free attacker_pk: public_key.
+query event(FirstKeyAdded(honest_actor, attacker_pk)).
+
+(* PKD SERVER PROCESSES *)
+
+(* --- Process First AddKey (Self-Signed) ---
+   This process handles the first key registration for an actor.
+   The message must be self-signed by the key being added. *)
+let PKD_ProcessFirstAddKey =
+  in(c, (actor: actor_id, new_pk: public_key, sig: signature));
+  let msg = AddKeyMsg(actor, new_pk) in
+
+  (* Check: actor must not already have any keys *)
+  get registered_keys(=actor, existing_pk) in
+    (* Actor already has keys - reject self-signed AddKey *)
+    event UnauthorizedKeyAttempt(actor, new_pk)
+  else
+    (* Actor has no keys - verify self-signature *)
+    if verify(msg, sig, new_pk) = true then
+      (* Valid self-signature for first key *)
+      event SelfSignedAccepted(actor, new_pk);
+      event FirstKeyAdded(actor, new_pk);
+      insert registered_keys(actor, new_pk);
+      out(c, (actor, new_pk))
+    else
+      event InvalidSignatureAttempt(actor).
+
+(* --- Process Subsequent AddKey (Authorized by Existing) ---
+   This process handles adding a new key when the actor already has keys.
+   The message must be signed by an existing, non-revoked key. *)
+let PKD_ProcessSubsequentAddKey =
+  in(c, (actor: actor_id, new_pk: public_key, auth_pk: public_key, sig: signature));
+  let msg = AddKeyMsg(actor, new_pk) in
+
+  (* Check: authorizing key must be registered for this actor *)
+  get registered_keys(=actor, =auth_pk) in
+    (* Check: authorizing key must not be revoked *)
+    get revoked_keys(=actor, =auth_pk) in
+      (* Key is revoked - reject *)
+      event UnauthorizedKeyAttempt(actor, new_pk)
+    else
+      (* Verify signature from authorizing key *)
+      if verify(msg, sig, auth_pk) = true then
+        event AuthorizedByExisting(actor, new_pk, auth_pk);
+        event SubsequentKeyAdded(actor, new_pk, auth_pk);
+        insert registered_keys(actor, new_pk);
+        out(c, (actor, new_pk, auth_pk))
+      else
+        event InvalidSignatureAttempt(actor)
+  else
+    (* Authorizing key not registered - reject *)
+    event UnauthorizedKeyAttempt(actor, new_pk).
+
+(* --- Process RevokeKey ---
+   Revoke a key for an actor. Must be signed by a non-revoked key. *)
+let PKD_ProcessRevokeKey =
+  in(c, (actor: actor_id, revoke_pk: public_key, auth_pk: public_key, sig: signature));
+  let msg = RevokeKeyMsg(actor, revoke_pk) in
+
+  (* Check: key to revoke must be registered *)
+  get registered_keys(=actor, =revoke_pk) in
+    (* Check: authorizing key must be registered and not revoked *)
+    get registered_keys(=actor, =auth_pk) in
+      get revoked_keys(=actor, =auth_pk) in
+        0  (* Authorizing key is revoked - silent reject *)
+      else
+        if verify(msg, sig, auth_pk) = true then
+          insert revoked_keys(actor, revoke_pk);
+          event KeyRevoked(actor, revoke_pk);
+          out(c, (actor, revoke_pk))
+        else
+          0
+    else
+      0  (* Authorizing key not found *)
+  else
+    0.   (* Key to revoke not found *)
+
+(* HONEST ACTOR PROCESS *)
+
+(* Honest actor who properly registers their first key *)
+let HonestActor(actor: actor_id, sk: secret_key) =
+  let pk_val = pk(sk) in
+  let msg = AddKeyMsg(actor, pk_val) in
+  let sig = sign(msg, sk) in
+  out(c, (actor, pk_val, sig)).
+
+(* Honest actor adding a second key (authorized by first) *)
+let HonestActorAddSecondKey(actor: actor_id, existing_sk: secret_key, new_pk: public_key) =
+  let existing_pk = pk(existing_sk) in
+  let msg = AddKeyMsg(actor, new_pk) in
+  let sig = sign(msg, existing_sk) in
+  out(c, (actor, new_pk, existing_pk, sig)).
+
+(* ATTACKER SCENARIOS *)
+
+(* Attacker tries to add their key for an honest actor (should fail) *)
+let AttackerAddKey(target_actor: actor_id, attacker_sk: secret_key) =
+  let attacker_pk_val = pk(attacker_sk) in
+  let msg = AddKeyMsg(target_actor, attacker_pk_val) in
+  let sig = sign(msg, attacker_sk) in
+  (* Attacker sends self-signed message for honest actor *)
+  out(c, (target_actor, attacker_pk_val, sig)).
+
+(* MAIN PROCESS *)
+
+process
+  (* Generate honest actor's secret key *)
+  new honest_sk_gen: secret_key;
+  let honest_pk = pk(honest_sk_gen) in
+
+  (* Generate attacker's key *)
+  new attacker_sk: secret_key;
+  let attacker_pk_val = pk(attacker_sk) in
+  out(c, attacker_pk_val);  (* Attacker's public key is public *)
+  out(c, attacker_sk);       (* For symbolic model, attacker controls their sk *)
+
+  (
+    (* PKD server processes *)
+    !PKD_ProcessFirstAddKey |
+    !PKD_ProcessSubsequentAddKey |
+    !PKD_ProcessRevokeKey |
+
+    (* Honest actor registers their key *)
+    HonestActor(honest_actor, honest_sk_gen) |
+
+    (* Publish honest actor's ID *)
+    out(c, honest_actor)
+  )

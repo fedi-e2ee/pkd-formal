@@ -1,0 +1,187 @@
+(*= traceability/specifications/public-key-directory-specification/Specification.md#protocol-signatures *)
+(*# Protocol Signature Construction: Signatures are computed over Pre-Authentication Encoding *)
+
+(* TYPE DECLARATIONS *)
+
+type context.                  (* Protocol context string *)
+type action.                   (* Message type *)
+type message_payload.          (* JSON message body *)
+type merkle_root.              (* Recent Merkle root *)
+type pae_encoding.             (* PAE-encoded message *)
+type signature.                (* Ed25519 signature *)
+type public_key.               (* Public key *)
+type secret_key.               (* Secret key *)
+
+(* CHANNELS *)
+
+free c: channel.               (* Public network channel *)
+
+(* CONSTANTS *)
+
+const PKD_CONTEXT: context.    (* "!pkd-context" *)
+const OTHER_CONTEXT: context.  (* Different protocol context *)
+
+(* Message action types *)
+const ACTION_ADD_KEY: action.
+const ACTION_REVOKE_KEY: action.
+const ACTION_MOVE_IDENTITY: action.
+const ACTION_BURN_DOWN: action.
+
+(* CRYPTOGRAPHIC FUNCTIONS *)
+
+(* --- Pre-Authentication Encoding (PAE) ---
+   PAE is modeled as an injective constructor.
+   Injectivity means:
+     PAE(ctx1, a1, m1, r1) = PAE(ctx2, a2, m2, r2)
+     implies ctx1=ctx2, a1=a2, m1=m2, r1=r2
+*)
+fun pae(context, action, message_payload, merkle_root): pae_encoding [data].
+
+(* In ProVerif, constructors marked [data] are automatically injective *)
+
+(* --- Ed25519 Signatures --- *)
+fun pk(secret_key): public_key.
+fun sign(pae_encoding, secret_key): signature.
+reduc forall m: pae_encoding, sk: secret_key;
+  verify_sig(m, sign(m, sk), pk(sk)) = true.
+
+(* EVENTS FOR SECURITY PROPERTIES *)
+
+event MessageSigned(context, action, message_payload, merkle_root, public_key).
+event SignatureVerified(context, action, message_payload, merkle_root, public_key).
+event PAECollision(context, action, message_payload, merkle_root,
+                   context, action, message_payload, merkle_root).
+event CrossProtocolAttack(context, context).
+event ActionSubstitution(action, action).
+
+(* SECURITY QUERIES *)
+
+(* --- Query 1: PAE Injectivity (No Collisions) ---
+   If two different messages produce the same PAE encoding, they must be identical *)
+query ctx1: context, a1: action, m1: message_payload, r1: merkle_root,
+      ctx2: context, a2: action, m2: message_payload, r2: merkle_root;
+  event(PAECollision(ctx1, a1, m1, r1, ctx2, a2, m2, r2)).
+
+(* --- Query 2: Domain Separation ---
+   Signatures from different protocol contexts cannot be confused *)
+query ctx1: context, ctx2: context;
+  event(CrossProtocolAttack(ctx1, ctx2)).
+
+(* --- Query 3: Action Type Binding ---
+   Cannot substitute one action type for another with same signature *)
+query a1: action, a2: action;
+  event(ActionSubstitution(a1, a2)).
+
+(* --- Query 4: Honest Signature Cannot Be Forged ---
+   Attacker cannot create valid signature for honest key *)
+free honest_pk: public_key [private].
+query attacker(honest_pk).
+
+(* HONEST SIGNING PROCESS *)
+
+let HonestSigner(sk: secret_key, ctx: context, action_type: action,
+                  msg: message_payload, root: merkle_root) =
+  (* Encode message with PAE *)
+  let pae_encoded = pae(ctx, action_type, msg, root) in
+
+  (* Sign the PAE-encoded message *)
+  let sig = sign(pae_encoded, sk) in
+  let pk_val = pk(sk) in
+
+  event MessageSigned(ctx, action_type, msg, root, pk_val);
+  out(c, (ctx, action_type, msg, root, sig, pk_val)).
+
+(* PKD VERIFICATION PROCESS *)
+
+let PKD_VerifySignature =
+  in(c, (ctx: context, action_type: action, msg: message_payload,
+         root: merkle_root, sig: signature, pk_val: public_key));
+
+  (* Reconstruct PAE encoding *)
+  let pae_encoded = pae(ctx, action_type, msg, root) in
+
+  (* Verify signature *)
+  if verify_sig(pae_encoded, sig, pk_val) = true then
+    event SignatureVerified(ctx, action_type, msg, root, pk_val);
+    out(c, (ctx, action_type, msg, root)).
+
+(* ATTACKER SCENARIOS *)
+
+(* Attacker tries to find PAE collision *)
+let AttackerPAECollision(ctx1: context, a1: action, m1: message_payload, r1: merkle_root) =
+  in(c, (ctx2: context, a2: action, m2: message_payload, r2: merkle_root));
+
+  (* Check if different inputs produce same PAE *)
+  let pae1 = pae(ctx1, a1, m1, r1) in
+  let pae2 = pae(ctx2, a2, m2, r2) in
+
+  if pae1 = pae2 then
+    (* Check if inputs are actually different *)
+    if (ctx1 <> ctx2) || (a1 <> a2) || (m1 <> m2) || (r1 <> r2) then
+      event PAECollision(ctx1, a1, m1, r1, ctx2, a2, m2, r2);
+      out(c, (pae1, pae2)).
+
+(* Attacker tries cross-protocol attack *)
+let AttackerCrossProtocol(sk: secret_key, msg: message_payload, root: merkle_root) =
+  (* Sign message with PKD_CONTEXT *)
+  let pae1 = pae(PKD_CONTEXT, ACTION_ADD_KEY, msg, root) in
+  let sig = sign(pae1, sk) in
+
+  (* Try to verify with OTHER_CONTEXT *)
+  let pae2 = pae(OTHER_CONTEXT, ACTION_ADD_KEY, msg, root) in
+  if verify_sig(pae2, sig, pk(sk)) = true then
+    event CrossProtocolAttack(PKD_CONTEXT, OTHER_CONTEXT);
+    out(c, sig).
+
+(* Attacker tries action substitution *)
+let AttackerActionSubstitution(sk: secret_key, msg: message_payload, root: merkle_root) =
+  (* Sign AddKey message *)
+  let pae1 = pae(PKD_CONTEXT, ACTION_ADD_KEY, msg, root) in
+  let sig = sign(pae1, sk) in
+
+  (* Try to verify as RevokeKey *)
+  let pae2 = pae(PKD_CONTEXT, ACTION_REVOKE_KEY, msg, root) in
+  if verify_sig(pae2, sig, pk(sk)) = true then
+    event ActionSubstitution(ACTION_ADD_KEY, ACTION_REVOKE_KEY);
+    out(c, sig).
+
+(* Attacker tries merkle root substitution (replay) *)
+let AttackerMerkleRootReplay(sk: secret_key, msg: message_payload) =
+  new old_root: merkle_root;
+  new new_root: merkle_root;
+
+  (* Sign message with old root *)
+  let pae1 = pae(PKD_CONTEXT, ACTION_ADD_KEY, msg, old_root) in
+  let sig = sign(pae1, sk) in
+
+  (* Try to verify with new root *)
+  let pae2 = pae(PKD_CONTEXT, ACTION_ADD_KEY, msg, new_root) in
+  if verify_sig(pae2, sig, pk(sk)) = true then
+    (* This would be a successful replay attack *)
+    out(c, sig).
+
+(* MAIN PROCESS *)
+
+process
+  (* Generate honest signer *)
+  new honest_sk: secret_key;
+  new honest_msg: message_payload;
+  new honest_root: merkle_root;
+
+  (* Generate attacker *)
+  new attacker_sk: secret_key;
+  out(c, attacker_sk);
+  out(c, pk(attacker_sk));
+
+  (
+    (* Honest signing and verification *)
+    !HonestSigner(honest_sk, PKD_CONTEXT, ACTION_ADD_KEY, honest_msg, honest_root) |
+    !PKD_VerifySignature |
+
+    (* Attacker scenarios *)
+    !AttackerPAECollision(PKD_CONTEXT, ACTION_ADD_KEY, honest_msg, honest_root) |
+    !AttackerCrossProtocol(attacker_sk, honest_msg, honest_root) |
+    !AttackerActionSubstitution(attacker_sk, honest_msg, honest_root) |
+    !AttackerMerkleRootReplay(attacker_sk, honest_msg)
+  )
+

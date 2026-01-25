@@ -1,0 +1,183 @@
+(*= traceability/specifications/public-key-directory-specification/Specification.md#moveidentity *)
+(*# MoveIdentity: Migrate actor identity from old-actor to new-actor *)
+
+(* ============================================================================
+   TYPE DECLARATIONS
+   ============================================================================ *)
+
+type actor_id.
+type server_id.
+type public_key.
+type secret_key.
+
+(* ============================================================================
+   CHANNELS
+   ============================================================================ *)
+
+free c: channel.
+
+(* ============================================================================
+   CRYPTOGRAPHIC FUNCTIONS
+   ============================================================================ *)
+
+fun pk(secret_key): public_key.
+
+(* Protocol signature for MoveIdentity messages *)
+fun protocol_sign(bitstring, secret_key): bitstring.
+reduc forall m: bitstring, sk: secret_key;
+  protocol_verify(m, protocol_sign(m, sk), pk(sk)) = true.
+
+(* HTTP signature (distinct type to model domain separation) *)
+fun http_sign(bitstring, secret_key): bitstring.
+reduc forall m: bitstring, sk: secret_key;
+  http_verify(m, http_sign(m, sk), pk(sk)) = true.
+
+(* Message construction *)
+fun MoveIdentityMsg(actor_id, actor_id): bitstring.
+
+(* ============================================================================
+   EVENTS
+   ============================================================================ *)
+
+event IdentityMoved(actor_id, actor_id).
+event ProtocolSigVerified(actor_id, public_key).
+event HTTPSigVerified(actor_id, public_key).
+event OldActorKeyVerified(actor_id, public_key).
+event TargetEmpty(actor_id).
+event TargetHasKeys(actor_id).
+
+(* ============================================================================
+   SECURITY QUERIES
+   ============================================================================ *)
+
+(* Query 1: MoveIdentity requires valid protocol signature from old actor's key *)
+query old_actor: actor_id, new_actor: actor_id, old_pk: public_key;
+  event(IdentityMoved(old_actor, new_actor)) ==>
+    event(ProtocolSigVerified(old_actor, old_pk)).
+
+(* Query 2: MoveIdentity requires valid HTTP signature from new server *)
+query old_actor: actor_id, new_actor: actor_id, new_server_pk: public_key;
+  event(IdentityMoved(old_actor, new_actor)) ==>
+    event(HTTPSigVerified(new_actor, new_server_pk)).
+
+(* Query 3: MoveIdentity requires old actor's key to be registered *)
+query old_actor: actor_id, new_actor: actor_id, old_pk: public_key;
+  event(IdentityMoved(old_actor, new_actor)) ==>
+    event(OldActorKeyVerified(old_actor, old_pk)).
+
+(* Query 4: MoveIdentity requires target actor to have no keys *)
+query old_actor: actor_id, new_actor: actor_id;
+  event(IdentityMoved(old_actor, new_actor)) ==>
+    event(TargetEmpty(new_actor)).
+
+(* Query 5: Cannot move to actor that has existing keys *)
+query old_actor: actor_id, new_actor: actor_id;
+  event(TargetHasKeys(new_actor)) && event(IdentityMoved(old_actor, new_actor)) ==> false.
+
+(* ============================================================================
+   PKD PROCESS - Models the validation logic
+   ============================================================================ *)
+
+let PKD_ProcessMoveIdentity(
+  (* Registered key for old actor *)
+  old_actor: actor_id, old_actor_pk: public_key,
+  (* Whether target has keys *)
+  new_actor: actor_id, target_has_keys: bool,
+  (* New server's public key for HTTP sig verification *)
+  new_server_pk: public_key
+) =
+  in(c, (claimed_old: actor_id, claimed_new: actor_id,
+         protocol_sig: bitstring, http_sig: bitstring,
+         claimed_old_pk: public_key, claimed_server_pk: public_key));
+
+  let msg = MoveIdentityMsg(claimed_old, claimed_new) in
+
+  (* REQUIREMENT 1: Verify protocol signature *)
+  if protocol_verify(msg, protocol_sig, claimed_old_pk) = true then
+  event ProtocolSigVerified(claimed_old, claimed_old_pk);
+
+  (* REQUIREMENT 2: Check claimed key matches registered key for old actor *)
+  if claimed_old = old_actor then
+  if claimed_old_pk = old_actor_pk then
+  event OldActorKeyVerified(claimed_old, claimed_old_pk);
+
+  (* REQUIREMENT 3: Verify HTTP signature from new server *)
+  let http_payload = (claimed_old, claimed_new) in
+  if http_verify(http_payload, http_sig, claimed_server_pk) = true then
+  event HTTPSigVerified(claimed_new, claimed_server_pk);
+
+  (* REQUIREMENT 4: Check target actor has no keys *)
+  if claimed_new = new_actor then
+  if target_has_keys = false then
+  (
+    event TargetEmpty(claimed_new);
+    event IdentityMoved(claimed_old, claimed_new);
+    out(c, (claimed_old, claimed_new))
+  )
+  else
+  (
+    event TargetHasKeys(claimed_new)
+  ).
+
+(* ============================================================================
+   HONEST ACTOR - Legitimate migration
+   ============================================================================ *)
+
+let HonestMigration(old_actor: actor_id, new_actor: actor_id,
+                     actor_sk: secret_key, server_sk: secret_key) =
+  let actor_pk = pk(actor_sk) in
+  let server_pk = pk(server_sk) in
+  let msg = MoveIdentityMsg(old_actor, new_actor) in
+  let protocol_sig = protocol_sign(msg, actor_sk) in
+  let http_payload = (old_actor, new_actor) in
+  let http_sig = http_sign(http_payload, server_sk) in
+  out(c, (old_actor, new_actor, protocol_sig, http_sig, actor_pk, server_pk)).
+
+(* ============================================================================
+   MAIN PROCESS
+   ============================================================================ *)
+
+process
+  (* Honest old actor with registered key *)
+  new honest_old_actor: actor_id;
+  new honest_actor_sk: secret_key;
+  let honest_actor_pk = pk(honest_actor_sk) in
+
+  (* Honest new actor (empty, no keys) *)
+  new honest_new_actor: actor_id;
+
+  (* Honest new server *)
+  new honest_server_sk: secret_key;
+  let honest_server_pk = pk(honest_server_sk) in
+
+  (* Target actor that already has keys *)
+  new occupied_target: actor_id;
+
+  (* Attacker *)
+  new attacker_sk: secret_key;
+  let attacker_pk = pk(attacker_sk) in
+
+  (* Attacker knows their own credentials *)
+  out(c, attacker_sk);
+  out(c, attacker_pk);
+
+  (* Attacker knows public information *)
+  out(c, honest_old_actor);
+  out(c, honest_new_actor);
+  out(c, occupied_target);
+  out(c, honest_actor_pk);
+  out(c, honest_server_pk);
+
+  (
+    (* PKD accepts move to empty target *)
+    PKD_ProcessMoveIdentity(honest_old_actor, honest_actor_pk,
+                            honest_new_actor, false, honest_server_pk) |
+
+    (* PKD rejects move to occupied target *)
+    PKD_ProcessMoveIdentity(honest_old_actor, honest_actor_pk,
+                            occupied_target, true, honest_server_pk) |
+
+    (* Honest migration attempt *)
+    HonestMigration(honest_old_actor, honest_new_actor,
+                    honest_actor_sk, honest_server_sk)
+  )

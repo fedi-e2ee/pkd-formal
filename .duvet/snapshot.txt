@@ -1,0 +1,804 @@
+SPECIFICATION: [Public Key Directory Specification](https://raw.githubusercontent.com/fedi-e2ee/public-key-directory-specification/refs/heads/main/Specification.md)
+  SECTION: [Notation and Conventions](#notation-and-conventions)
+    TEXT[!MUST]: The key words "**MUST**", "**MUST NOT**", "**REQUIRED**", "**SHALL**", "**SHALL NOT**", "**SHOULD**", "**SHOULD NOT**",
+    TEXT[!MUST]: "**RECOMMENDED**", "**MAY**", and "**OPTIONAL**" in this document are to be interpreted as described in
+    TEXT[!MUST]: [RFC 2119](https://datatracker.ietf.org/doc/html/rfc2119).
+
+  SECTION: [Actor ID Canonicalization](#actor-id-canonicalization)
+    TEXT[!MUST]: When comparing Actor IDs, implementations **MUST**
+    TEXT[!MUST]: use byte-for-byte string comparison after canonicalization.
+    TEXT[!MUST]:    * Normalize `http://` to `https://` (HTTPS is **REQUIRED** for all Actor IDs)
+    TEXT[!SHOULD]: **Internationalized Domain Names**: Implementations **SHOULD** convert internationalized domain names to ASCII
+    TEXT[!SHOULD]:    using [IDNA (RFC 5891)](https://datatracker.ietf.org/doc/html/rfc5891) before performing WebFinger lookups.
+    TEXT[!MUST]: Implementations **MUST NOT** perform additional URL normalization such as:
+
+  SECTION: [Message Blocks](#message-blocks)
+    TEXT[!MUST]: Any other machine **MUST** be able to reproduce the same state as the Public Key Directory by replaying the entire
+    TEXT[!MUST]: message history from the first block to the current one.
+    TEXT[!MUST]: Each Protocol Message **MUST** be unique.
+    TEXT[!MUST]: Public Key Directory servers **MUST** reject any replayed Protocol Message,
+    TEXT[!MUST]: even if it's otherwise valid.
+    TEXT[!MUST]: **Merkle root freshness**: The `recent-merkle-root` field **MUST** reference a Merkle root that was valid within
+    TEXT[!MUST]:    a recent time window (see [Recent Merkle Root](#recent-merkle-root-included-in-plaintext-commitments)).
+    TEXT[!SHOULD]: **Signature deduplication**: Implementations **SHOULD** maintain a short-lived cache of recently accepted message
+    TEXT[!SHOULD]:    signatures to detect and reject duplicate submissions within the freshness window.
+    TEXT[!SHOULD]: Implementations **SHOULD** provide a distinct error message for when a unique message has already been accepted and
+    TEXT[!SHOULD]: processed by the system in a very recent period of time.
+    TEXT[!MUST]: This **MUST** be distinct from an error condition.
+
+  SECTION: [Protocol Signatures](#protocol-signatures)
+    TEXT[!MUST]:    Object keys **MUST** be sorted in ASCII byte order, and there **MUST** be no duplicate keys.
+
+  SECTION: [Key Identifiers](#key-identifiers)
+    TEXT[!SHOULD]: Every message except revocations and the first `AddKey` for an Actor **SHOULD** include a `key-id` value.
+    TEXT[!MUST]: The `key-id` attribute **MUST NOT** be an encoded representation of the public key.
+
+  SECTION: [Revocation Tokens](#revocation-tokens)
+    TEXT[!MAY]: These values **MAY** be encrypted and stored in case of emergency.
+
+  SECTION: [Requirements for Auxiliary Data Extensions](#requirements-for-auxiliary-data-extensions)
+    TEXT[!SHOULD]: Being very strict about the format of the data accepted by a given extension is highly **RECOMMENDED**.
+
+  SECTION: [Timestamps](#timestamps)
+    TEXT[!MUST]: Implementations **MUST NOT** truncate UNIX timestamps to 32 bits.
+
+  SECTION: [Glossary](#glossary)
+    TEXT[!MUST]: When provided with `user@domain`, the Public Key
+    TEXT[!MUST]:   Directory software (both client and server) **MUST** use WebFinger to obtain the correct URL for an Actor.
+
+  SECTION: [Hostile nation state seeks to abuse _Right To Be Forgotten_ mechanisms to cover up an unlawful intrusion.](#hostile-nation-state-seeks-to-abuse-right-to-be-forgotten-mechanisms-to-cover-up-an-unlawful-intrusion)
+    TEXT[!MUST]: To address this risk, any software building E2EE on top of the Public Key Directory **MUST** immediately demote the
+    TEXT[!MUST]: trust status of any participants that receive a successful BurnDown.
+
+  SECTION: [Attacker sends spoofed messages from a compromised Fediverse server.](#attacker-sends-spoofed-messages-from-a-compromised-fediverse-server)
+    TEXT[!MUST]: All other Protocol Messages must be signed by the user's secret key, which the Fediverse server **MUST NOT** possess.
+
+  SECTION: [Cosmic ray causes a bit-flip on stored data or the result of a computation.](#cosmic-ray-causes-a-bit-flip-on-stored-data-or-the-result-of-a-computation)
+    TEXT[!SHOULD]: To mitigate this risk, participants in this network (users and Fediverse Servers) **SHOULD** send Protocol Messages to
+    TEXT[!SHOULD]: multiple Public Key Directory servers and, in turn, poll multiple servers.
+    TEXT[!SHOULD]: Clients **SHOULD** additionally be configured
+    TEXT[!SHOULD]: to require a quorum before trusting its responses.
+
+  SECTION: [Malicious instance administrator attempts to censor Fireproof messages to retain control.](#malicious-instance-administrator-attempts-to-censor-fireproof-messages-to-retain-control)
+    TEXT[!SHOULD]: For this reason, users **SHOULD** encrypt all of their Protocol Messages, not just `Fireproof` messages.
+    TEXT[!SHOULD]: It is further **RECOMMENDED** for client software to make this encryption the default behavior.
+
+  SECTION: [Attacker submits contraband as auxiliary data.](#attacker-submits-contraband-as-auxiliary-data)
+    TEXT[!SHOULD]: To prevent this risk, extensions **SHOULD** be strict about the data they accept.
+
+  SECTION: [Timing Side-Channel Attacks](#timing-side-channel-attacks)
+    TEXT[!MUST]: To address this risk, implementations **MUST** use constant-time comparison functions (e.g., `hash_equals()` in PHP,
+    TEXT[!MUST]: `crypto.timingSafeEqual()` in Node.js, `hmac.compare_digest()` in Python) for all security-sensitive comparisons.
+    TEXT[!SHOULD]: Cryptographic libraries used by PKD implementations **SHOULD** be verified to provide constant-time operations for
+    TEXT[!SHOULD]: signature verification and decryption.
+
+  SECTION: [Parallel Enrollment Race Conditions](#parallel-enrollment-race-conditions)
+    TEXT[!MUST]: Once the first
+    TEXT[!MUST]: `AddKey` is committed to the tree, the Actor is no longer un-enrolled, and subsequent self-signed `AddKey` messages
+    TEXT[!MUST]: **MUST** be rejected.
+    TEXT[!MUST]: Implementations **MUST** ensure atomic processing of Protocol Messages to prevent TOCTOU
+    TEXT[!MUST]: (time-of-check-time-of-use) vulnerabilities.
+
+  SECTION: [DNS Rebinding Attacks](#dns-rebinding-attacks)
+    TEXT[!MUST]: * PKD servers **MUST** validate the `Host` header against an allow-list of expected hostnames
+    TEXT[!SHOULD]: * PKD servers **SHOULD** reject requests with IP addresses in the `Host` header
+    TEXT[!MAY]: * PKD servers **MAY** implement additional protections such as requiring authentication for sensitive operations
+
+  SECTION: [Cross-PKD Consistency Verification Attacks](#cross-pkd-consistency-verification-attacks)
+    TEXT[!SHOULD]: Clients that query multiple PKDs **SHOULD** verify that Checkpoint messages exist linking the PKDs' histories and that
+    TEXT[!SHOULD]: the Merkle roots are consistent with recent Checkpoints.
+    TEXT[!MAY]: For high-security use cases, clients **MAY** require that all queried PKDs have mutually consistent Checkpoint histories
+    TEXT[!MAY]: before trusting any public key mappings.
+
+  SECTION: [Protocol Messages](#protocol-messages)
+    TEXT[!MUST]: Dictionary keys **MUST** be unique within the same level.
+    TEXT[!SHOULD]: Dictionary keys **SHOULD** be sorted.
+    TEXT[!MAY]: Participants **MAY** use whitespace, but it is not required or recommended.
+    TEXT[!SHOULD]: Some protocol messages **SHOULD** also include a top level `"key-id"` attribute, which will help implementations select
+    TEXT[!SHOULD]: one of many public keys to validate the signature.
+    TEXT[!MAY]: If no `key-id` is provided, each valid public key **MAY** be tried.
+    TEXT[!MUST]: These Protocol Message types are generated client-side and **MUST** be
+    TEXT[!MUST]: [encrypted with HPKE](#protocol-message-encryption) before being sent to the Fediverse Server that provides the HTTP
+    TEXT[!MUST]: Message Signature if the client is properly authenticated.
+
+  SECTION: [AddKey](#addkey)
+    TEXT[!MUST]: The first `AddKey` for any given Actor **MUST** be self-signed by the same public key being added.
+    TEXT[!SHOULD]: Every subsequent `AddKey` for a given Actor
+    TEXT[!SHOULD]: **SHOULD** have a `key-id`.
+    TEXT[!MUST]: All `AddKey` messages for a given actor must be sent from the actor's Fediverse Server, which **MUST** support HTTP
+    TEXT[!MUST]: Signatures.
+
+  SECTION: [RevokeKey](#revokekey)
+    TEXT[!MUST]: Attempting to issue a `RevokeKey` **MUST** fail unless there is another public key associated with this Actor.
+    TEXT[!MUST]: > [!IMPORTANT]
+    TEXT[!MUST]: > **Protocol Invariant**: Implementations **MUST** enforce that at least one valid (non-revoked) public key remains
+    TEXT[!MUST]: > after a `RevokeKey` operation.
+    TEXT[!MUST]: The PKD **MUST** reject any
+    TEXT[!MUST]: > `RevokeKey` message that would leave an Actor with zero valid keys.
+
+  SECTION: [MoveIdentity](#moveidentity)
+    TEXT[!MUST]: The message **MUST** be signed by a valid secret key for the `old-actor`, whereas the HTTP Signature **MUST** come from
+    TEXT[!MUST]: the new Fediverse Server instance.
+    TEXT[!MUST]: > Implementations **MUST** verify both signatures independently.
+    TEXT[!MUST]: These signatures serve
+    TEXT[!MUST]: > different purposes and **MUST NOT** be conflated or allow one to substitute for the other.
+    TEXT[!MUST]: This message **MUST** be rejected if there are existing public keys for the target `new-actor`.
+
+  SECTION: [Fireproof](#fireproof)
+    TEXT[!MAY]: This message **MAY** be sent out-of-band to the Public Key Directory without the Fediverse server's involvement.
+    TEXT[!MUST]: If an Actor is already in Fireproof status, a
+    TEXT[!MUST]: > subsequent `Fireproof` message **MUST** be rejected.
+    TEXT[!MUST]: Implementations **MUST** track whether an Actor is currently in Fireproof status and reject
+    TEXT[!MUST]: > duplicate `Fireproof` messages accordingly.
+
+  SECTION: [BurnDown Validation Steps](#burndown-validation-steps)
+    TEXT[!MUST]: > [!IMPORTANT]
+    TEXT[!MUST]: > **Atomicity Requirement**: When a `BurnDown` Protocol Message is accepted (i.e., the actor **MUST NOT** be Fireproof),
+    TEXT[!MUST]: > implementations **MUST** atomically perform the following operations within one transaction:
+    TEXT[!MUST]: > These operations **MUST** be performed as a single atomic transaction.
+    TEXT[!SHOULD]: Note: Processing the message **SHOULD** also require a valid one-time password (OTP).
+
+  SECTION: [RevokeKeyThirdParty Validation Steps](#revokekeythirdparty-validation-steps)
+    TEXT[!SHOULD]:    (In practice, this **SHOULD** only be one, but if that's ever not the case, we revoke them all here.)
+
+  SECTION: [Encryption of Protocol Messages](#encryption-of-protocol-messages)
+    TEXT[!MAY]: Protocol Messages **MAY** originate from an end user (via client-side software) or a Fediverse instance.
+    TEXT[!MUST]: Protocol messages that originate client-side **MUST** be encrypted using [HPKE (RFC 9180)](https://datatracker.ietf.org/doc/rfc9180/),
+    TEXT[!MUST]: with the [HPKE ciphersuite](#hpke-cipher-suites) chosen by the server.
+    TEXT[!MUST]: When encryption is chosen, the client software **MUST** use a specific public key provided by the Public Key Directory
+    TEXT[!MUST]: server for this purpose.
+    TEXT[!SHOULD]: The Public Key Directory's public key **MAY** rotate frequently, and **SHOULD** be fetched from the server and cached
+    TEXT[!SHOULD]: client-side for no more than 24 hours.
+
+  SECTION: [Protocol Message Encryption](#protocol-message-encryption)
+    TEXT[!MUST]: `BurnDown` messages **MUST NOT** be encrypted.
+    TEXT[!MUST]: `BurnDown` messages also **MUST NOT** be sent via ActivityPub, and therefore are not generated client-side.
+    TEXT[!MUST]: When encryption is used, the Protocol Message **MUST** be serialized as a JSON string and then encrypted according to
+    TEXT[!MUST]: the specific HPKE cipher suite advertised by the Public Key Directory, using the given public key.
+    TEXT[!SHOULD]: Users **MAY** pad the plaintext before encryption with additional whitespace to their desired length, but **SHOULD**
+    TEXT[!SHOULD]: keep their plaintext JSON blobs smaller than 16 MiB (16,777,216 bytes).
+    TEXT[!MUST]: When encrypting, the AAD parameter of the HPKE encryption **MUST** be set to the Server Encapsulation Key Identifier.
+
+  SECTION: [Protocol Message Decryption](#protocol-message-decryption)
+    TEXT[!MUST]: The result of a successful decryption **MUST** be a string that corresponds to a JSON-encoded Protocol Message.
+    TEXT[!MAY]: This
+    TEXT[!MAY]: JSON blob **MAY** have additional whitespace appended to it.
+
+  SECTION: [HPKE Configuration](#hpke-configuration)
+    TEXT[!MUST]: The `info` parameter **MUST** always be set to the UTF-8 string, `fedi-e2ee/public-key-directory:v1:protocol-message`.
+
+  SECTION: [Ciphertext Encoding](#ciphertext-encoding)
+    TEXT[!MUST]: When a Protocol Message is encrypted with HPKE, the resulting ciphertext **MUST** be base64url-encoded.
+    TEXT[!MUST]: This encoded
+    TEXT[!MUST]: string **MUST** be prefixed with `hpke:` (hexadecimal-encoded UTF-8 byte values: `68 70 6b 65 3a`).
+
+  SECTION: [Protocol Message Processing](#protocol-message-processing)
+    TEXT[!MUST]: While these messages **MAY** be generated
+    TEXT[!MUST]:   client-side by the moderator, the PKD server **MUST NOT** accept a BurnDown request through its ActivityPub inbox.
+
+  SECTION: [Rate-Limiting Bad Requests](#rate-limiting-bad-requests)
+    TEXT[!MAY]: Public Key Directories **MAY** specify a maximum time between requests from misbehaving instances.
+    TEXT[!MAY]: Attempting to send requests that trigger rate limit rejection **MAY** incur additional penalties, depending on server
+    TEXT[!MAY]: configuration, but it isn't required.
+    TEXT[!MAY]: Public Key Directories **MAY** also permanently block Fediverse Servers that
+    TEXT[!MAY]: routinely misbehave at their operator's discretion.
+    TEXT[!MUST]: [TOTP Messages](#totp) **MUST** employ aggressive rate-limiting for incorrect guesses, but for which the HTTP Signature
+    TEXT[!MUST]: was valid (i.e., the request originated from the instance).
+
+  SECTION: [Protocol Message Parsing](#protocol-message-parsing)
+    TEXT[!MAY]: The blob **MAY** be encrypted from the client software.
+    TEXT[!MUST]: Protocol Messages encrypted with HPKE in this way **MUST** always include an HTTP Signature header, and it **MUST** be
+    TEXT[!MUST]: valid.
+    TEXT[!MAY]: Plaintext HTTP Requests containing these Protocol Messages **MAY** be signed with an HTTP Signature.
+    TEXT[!MUST]: Encrypted Protocol messages **MUST** be decrypted after the signature verification is complete.
+    TEXT[!MUST]: If the decrypted Protocol Message is a `BurnDown`, the Public Key Directory **MUST** discard it.
+    TEXT[!MUST]: BurnDown messages
+    TEXT[!MUST]: **MUST** be sent by the instance server through a separate HTTP API, with a valid HTTP Message Signature for the
+    TEXT[!MUST]: operator issuing the BurnDown.
+    TEXT[!MAY]: The instance is responsible for ensuring that only administrators **MAY** send a `BurnDown` to a Public Key Directory.
+
+  SECTION: [Handling Protocol Messages](#handling-protocol-messages)
+    TEXT[!MUST]: Every Protocol Message received by a Public Key Directory **MUST** be unique.
+    TEXT[!MUST]: Additionally, the timestamp for most
+    TEXT[!MUST]: message types (except `RevokeKeyThirdParty`) **MUST** be present and within a reasonable window.
+    TEXT[!MUST]: Public Key Directories
+    TEXT[!MUST]: **MAY** configure a preferred time window for timestamps, but it **MUST** be no greater than 30 days (2592000 seconds).
+    TEXT[!MAY]: Servers **MAY** count this as an invalid message
+    TEXT[!MAY]: that incurs a rate limit penalty, but it is not required.
+    TEXT[!MUST]: If the action is one of the
+    TEXT[!MUST]: following, a valid HTTP Signature **MUST** have been sent with the message: `AddKey`, `MoveIdentity`.
+    TEXT[!MUST]: This behavior
+    TEXT[!MUST]: **MUST** implement the validation steps relevant to the appropriate Protocol Message.
+
+  SECTION: [TOTP Enrollment](#totp-enrollment)
+    TEXT[!MUST]: Both of these one-time passwords
+    TEXT[!MUST]: **MUST** be valid for the decrypted secret key before it is accepted by the Public Key Directory.
+    TEXT[!MUST]: This operation **MUST** fail if there is already a TOTP secret enrolled for an instance.
+
+  SECTION: [TOTP Disenrollment](#totp-disenrollment)
+    TEXT[!MUST]: This operation **MUST** fail if there is no TOTP secret enrolled for an instance.
+
+  SECTION: [TOTP Signatures](#totp-signatures)
+    TEXT[!MUST]: Each message-equivalent object **MUST** have an `actor-id` field, which allows the Public Key Directory software know
+    TEXT[!MUST]: which public key to use when verifying the message.
+    TEXT[!MUST]: The Public Key Directory software **MUST** verify that the Actor ID belongs to the instance in scope for the TOTP.
+    TEXT[!MUST]: Additionally, the HTTP Signature on the HTTP request body **MUST** also match the public key for the same actor.
+
+  SECTION: [TOTP Verification](#totp-verification)
+    TEXT[!MUST]: > [!IMPORTANT]
+    TEXT[!MUST]: > **One-Time Use Requirement**: Each TOTP code **MUST** be accepted for verification only once.
+    TEXT[!MUST]: Implementations
+    TEXT[!MUST]: > **MUST** track which TOTP codes have been successfully used within the valid time window (current, t-1, and t-2)
+    TEXT[!MUST]: > and reject any attempt to reuse the same code, even if it remains within the 90-second validity window (3 × 30
+    TEXT[!MUST]: > seconds).
+    TEXT[!MAY]: > The tracking state for used codes **MAY** be cleared after the code's time window has fully expired (i.e., after
+    TEXT[!MAY]: > 90 seconds from first use).
+
+  SECTION: [JSON REST API](#json-rest-api)
+    TEXT[!MUST]: Public Key Directory software **MUST NOT** support the HMAC, RSA, ECDSA, or JWS signature algorithms from RFC 9421.
+
+  SECTION: [Error Responses](#error-responses)
+    TEXT[!MUST]: When an API request fails, the server **MUST** return an appropriate HTTP status code and a JSON response body with the
+    TEXT[!MUST]: following structure:
+
+  SECTION: [Rate Limiting Headers](#rate-limiting-headers)
+    TEXT[!SHOULD]: When rate limiting is in effect (see [Rate-Limiting Bad Requests](#rate-limiting-bad-requests)), responses **SHOULD**
+    TEXT[!SHOULD]: include the following HTTP headers:
+    TEXT[!MUST]: When a request is rejected due to rate limiting, the server **MUST** return HTTP status 429 with the `Retry-After`
+    TEXT[!MUST]: header indicating when the client may retry.
+
+  SECTION: [GET api/extensions](#get-api-extensions)
+    TEXT[!MAY]: Extensions **MAY** include optional additional fields, if necessary, in the above table.
+
+  SECTION: [POST api/burndown](#post-api-burndown)
+    TEXT[!MUST]: An HTTP Message Signature **MUST** be included on the request.
+
+  SECTION: [POST api/revoke](#post-api-revoke)
+    TEXT[!MUST]: The following HTTP request parameters **MUST** be included:
+
+  SECTION: [POST api/totp/disenroll](#post-api-totp-disenroll)
+    TEXT[!MUST]: The following HTTP request parameters **MUST** be included:
+
+  SECTION: [POST api/totp/enroll](#post-api-totp-enroll)
+    TEXT[!MUST]: The following HTTP request parameters **MUST** be included:
+
+  SECTION: [POST api/totp/rotate](#post-api-totp-rotate)
+    TEXT[!MUST]: The following HTTP request parameters **MUST** be included:
+
+  SECTION: [POST api/history/cosign/:hash](#post-api-history-cosign-hash)
+    TEXT[!MUST]: The following HTTP request parameters **MUST** be included:
+
+  SECTION: [Passive Gossip (Mirroring)](#passive-gossip-mirroring)
+    TEXT[!MAY]: Mirrors **MAY** cache the corresponding plaintext fields from the source directory, provided
+    TEXT[!MAY]: they adhere to the [cache invalidation](#mirror-plaintext-cache-invalidation) specification.
+    TEXT[!SHOULD]: Replica instances **SHOULD** provide [witness co-signatures](#witness-co-signing) to the Transparency Log that
+    TEXT[!SHOULD]: the source PKD is built atop.
+
+  SECTION: [Trusted Mirrors](#trusted-mirrors)
+    TEXT[!MAY]: If the source Public Key Directory trusts the mirror's operators, the source **MAY** republish the symmetric key used
+    TEXT[!MAY]: to encrypt that Protocol Message's attributes, encrypted using HPKE with the mirror's latest public key (i.e., from
+    TEXT[!MAY]: their most recent Checkpoint).
+
+  SECTION: [Mirror Plaintext Cache Invalidation](#mirror-plaintext-cache-invalidation)
+    TEXT[!MUST]: The replicated ciphertext **MAY** be persisted indefinitely, but regardless of the trust status of a given Mirror, if
+    TEXT[!MUST]: the mirror has access to the plaintext (whether by caching a copy or by `rewrapped-keys`), the Mirror **MUST**
+    TEXT[!MUST]: occasionally attempt to verify that the source server has not deliberately wiped their copy of the symmetric key.
+    TEXT[!MUST]: If the source has, the mirror **MUST** do the same.
+    TEXT[!SHOULD]: When processing a request for a replicated record, checking the status of the upstream record is **RECOMMENDED** if it
+    TEXT[!SHOULD]: has not been checked in the past 24 hours.
+    TEXT[!MAY]: If the source comes back online, the
+    TEXT[!MAY]: mirror **MAY** re-cache the symmetric keys and/or plaintext.
+
+  SECTION: [Inclusion Proof Verification](#inclusion-proof-verification)
+    TEXT[!SHOULD]: When the JSON REST API returns an `inclusion-proof` field, clients **SHOULD** verify the proof to ensure the Protocol
+    TEXT[!SHOULD]: Message is correctly included in the Merkle tree.
+    TEXT[!SHOULD]: Clients that do not verify inclusion proofs lose the transparency guarantees of the system and **SHOULD** display a
+    TEXT[!SHOULD]: warning to users.
+
+  SECTION: [Witness Co-Signing](#witness-co-signing)
+    TEXT[!MUST]: At least
+    TEXT[!MUST]: one witness **MUST** also validate that the current state is deterministically reproducible from the history of the
+    TEXT[!MUST]: transparency log.
+    TEXT[!MUST]: * For basic operation, at least **one** independent witness **MUST** validate the transparency log.
+    TEXT[!SHOULD]: * For production deployments, **three or more** independent witnesses are **RECOMMENDED** to provide meaningful
+    TEXT[!SHOULD]:   protection against witness collusion (see [Witness Collusion](#witness-collusion-attacks)).
+    TEXT[!SHOULD]: * Witnesses **SHOULD** be operated by independent organizations with no shared operational control.
+    TEXT[!MAY]: * Clients **MAY** configure a minimum witness threshold for their own risk tolerance.
+
+  SECTION: [Verifying a Cosignature](#verifying-a-cosignature)
+    TEXT[!MUST]: To verify a witness cosignature, the following validation steps **MUST** be performed.
+
+  SECTION: [Protocol Message Encryption](#protocol-message-encryption-1)
+    TEXT[!MUST]: When sent over ActivityPub (i.e., generated client-side), the entirety of a Protocol Message **MUST** be encrypted
+    TEXT[!MUST]: using [HPKE (RFC 9180)](https://datatracker.ietf.org/doc/rfc9180/).
+    TEXT[!MUST]: When a `BurnDown` Protocol Message is issued by an instance server, it **MUST NOT** be HPKE-encrypted.
+    TEXT[!MAY]: Any currently acceptable HPKE algorithm **MAY** be used
+    TEXT[!MAY]: if the client and server both support it.
+    TEXT[!MUST]: For the current version of the protocol, clients and servers **MUST** support the
+    TEXT[!MUST]: [DHKEM(X25519, HKDF-SHA256) with HKDF-SHA256 and ChaCha20Poly1305](https://www.rfc-editor.org/rfc/rfc9180.html#name-dhkemx25519-hkdf-sha256-hkdf)
+    TEXT[!MUST]: cipher suite.
+
+  SECTION: [Recent Merkle Root Included in Plaintext Commitments](#recent-merkle-root-included-in-plaintext-commitments)
+    TEXT[!MUST]: Which
+    TEXT[!MUST]: root is selected **MUST** be stored alongside the ciphertext.
+    TEXT[!SHOULD]: Clients are **RECOMMENDED** to use the Merkle root of the most recent Protocol Message.
+    TEXT[!SHOULD]: If there are N accepted messages in the ledger, the selected Merkle root **SHOULD** be no more than log_2(N)^2
+    TEXT[!SHOULD]:    messages old (rounded up to the nearest whole number).
+    TEXT[!MUST]: Public Key Directories **MUST NOT** reject messages newer than
+    TEXT[!MUST]:    this threshold on basis of staleness.
+    TEXT[!MUST]: To tolerate large transaction volumes in a short window of time, the chosen Merkle root **MUST** be at least in the
+    TEXT[!MUST]:    most recent N/2 messages (for N currently accepted Protocol Messages), rounded down.
+    TEXT[!MAY]: Public Key Directories **MAY**
+    TEXT[!MAY]:    reject these messages due to staleness, especially if the Directory isn't experiencing significant throughput, or if
+    TEXT[!MAY]:    an Actor submits multiple Protocol Messages tied to a Merkle root too old to satisfy rule 2.
+    TEXT[!MAY]: However, if there is an enormous spike in traffic, Public Key Directories **MAY** tolerate as far back as 500,000,
+    TEXT[!MAY]: provided no two Protocol Messages from the same actor reuse the same "recent" Merkle root.
+    TEXT[!MUST]: For the first message in a PKD, the "recent" Merkle root **MUST** be set to the encoding of a sequence of `0x00`
+    TEXT[!MUST]: bytes equal in length to the hash function being used.
+
+  SECTION: [Client-Side Behavior](#client-side-behavior)
+    TEXT[!MUST]: BurnDown messages **MUST NOT** use HPKE
+    TEXT[!MUST]: encryption (the Public Key Directory **MUST** reject a BurnDown if it was HPKE encrypted), but the Instance Client
+    TEXT[!MUST]: **MUST** reject plaintext BurnDowns sent by users that do not have elevated privileges.
+
+  SECTION: [End User Clients](#end-user-clients)
+    TEXT[!MUST]: With the sole exception of [RevokeKeyThirdParty](#revokekeythirdparty), End User-generated Protocol Messages intended
+    TEXT[!MUST]: for the Public Key Directory **MUST** be sent to the Instance Client first.
+    TEXT[!SHOULD]: To prevent a malicious instance admin from selectively censoring different protocol message types, every protocol
+    TEXT[!SHOULD]: message emitted by the End User client **SHOULD** encrypt the protocol messages with [HPKE](#hpke-cipher-suites).
+
+  SECTION: [Instance Clients](#instance-clients)
+    TEXT[!MAY]: These clients **MAY** also be used by Public Key Directory servers to talk
+    TEXT[!MAY]: to each other (i.e., [Checkpoint](#checkpoint) messages).
+    TEXT[!MAY]: For [non-Fireproof](#fireproof) Actors enrolled on the instance, administrators **MAY** also issue [BurnDown](#burndown)
+    TEXT[!MAY]: messages to help their users re-enroll fresh keys to the Public Key Directory.
+    TEXT[!MUST]: These BurnDown messages will be generated
+    TEXT[!MUST]: by the Instance software directly (with a [one-time password](#totp), if a TOTP secret was previously enrolled) and
+    TEXT[!MUST]: **MUST NOT** be HPKE-encrypted.
+
+  SECTION: [Entropy and Randomness](#entropy-and-randomness)
+    TEXT[!MUST]: For randomness and entropy, the Operating System's Cryptographic Pseudo-Random Number Generator (CSPRNG) **MUST** be
+    TEXT[!MUST]: used.
+    TEXT[!MUST]: All cryptographic random values (nonces, keys, salts, IKM) **MUST** be generated using:
+    TEXT[!MUST]: Implementations **MUST NOT** use:
+    TEXT[!MUST]: **Entropy Requirements**: Input Key Material (IKM) generation **MUST** use at least 256 bits of entropy from the OS
+    TEXT[!MUST]: CSPRNG.
+    TEXT[!SHOULD]: Nonces and salts **SHOULD** use at least 128 bits of entropy.
+    TEXT[!MUST]: **Error Handling**: If the CSRNG fails or is unavailable (e.g., on early boot with insufficient entropy),
+    TEXT[!MUST]: implementations **MUST** abort the cryptographic operation and return an error.
+    TEXT[!MUST]: Implementations **MUST NOT** fall back
+    TEXT[!MUST]: to weak or predictable random number generation.
+
+  SECTION: [Encoding Codecs](#encoding-codecs)
+    TEXT[!MUST]: However, if the data
+    TEXT[!MUST]: being encoded or decoded is a secret (e.g., plaintext or cryptography key), the codec **MUST** be implemented in
+    TEXT[!MUST]: constant-time.
+
+  SECTION: [Miscellaneous](#miscellaneous)
+    TEXT[!MUST]: When comparing cryptographic outputs, a constant-time comparison **MUST** always be used.
+
+  SECTION: [Revocation and Account Recovery](#revocation-and-account-recovery)
+    TEXT[!MUST]: If a third party issues a `RevokeKeyThirdParty` with a valid revocation token for a fireproof user's only valid public
+    TEXT[!MUST]: key, the system **MUST** prioritize handling the key compromise as a higher priority.
+
+  SECTION: [Position Statement From the Authors](#position-statement-from-the-authors)
+    TEXT[!SHOULD]: Security researchers and whistleblowers **SHOULD** keep up-to-date on any use of `BurnDown` in their social graph, as
+    TEXT[!SHOULD]: well as any suspicious `AddKey` messages for users that have no interest in end-to-end encryption.
+
+  SECTION: [Availability](#availability)
+    TEXT[!SHOULD]: Client software **SHOULD** route Protocol Messages to more than one Public Key Directory, in case of catastrophic
+    TEXT[!SHOULD]: outages or data corruption, as outlined in [the threat model](#cosmic-ray-causes-a-bit-flip-on-stored-data-or-the-result-of-a-computation).
+    TEXT[!SHOULD]: Each Public Key Directory **SHOULD** use a different symmetric key for attribute encryption.
+    TEXT[!MAY]: Fediverse Servers **MAY**
+    TEXT[!MAY]: accept batches of different Protocol Messages (one for each Public Key Directory), and then fan them out asynchronously.
+    TEXT[!SHOULD]: Clients **SHOULD** also use a [recent Merkle root](#recent-merkle-root-included-in-plaintext-commitments) from the
+    TEXT[!SHOULD]: Transparency Log instance tied to that particular Public Key Directory.
+    TEXT[!SHOULD]: When requesting the public keys or auxiliary data for a specific ActivityPub actor, clients **SHOULD** query multiple
+    TEXT[!SHOULD]: Public Key Directories.
+    TEXT[!SHOULD]: The **RECOMMENDED** behavior is to require a specific entry exists in multiple PKDs to meet some
+    TEXT[!SHOULD]: client-side-configurable Quorum, and reject public keys that have not yet been broadcast to, and accepted by, sufficient
+    TEXT[!SHOULD]: Public Key Directory servers.
+
+  SECTION: [Reasoning for Encryption of Protocol Messages from Clients](#reasoning-for-encryption-of-protocol-messages-from-clients)
+    TEXT[!MUST]: The public key **MUST** be fetched directly from each Public Key Directory.
+    TEXT[!MUST]: Client software **MUST NOT** trust any
+    TEXT[!MUST]: public key provided by the Fediverse Server.
+    TEXT[!MUST]: All client-originated protocol messags **MUST** use HPKE encryption.
+
+  SECTION: [Understanding the role of signatures at different layers of the protocol](#understanding-the-role-of-signatures-at-different-layers-of-the-protocol)
+    TEXT[!SHOULD]: Instances **SHOULD** reject plaintext messages from being signed and passed onto the server and provide a specific
+    TEXT[!SHOULD]: mechanism for moderators to use for account recovery (which will use the [BurnDown API](#post-apiburndown).
+
+SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9162.txt
+  SECTION: [Signatures](#section-2.2)
+    TEXT[!MUST]:    When signing data structures, a log MUST use one of the signature
+    TEXT[!MUST]:    algorithms from the IANA "Signature Algorithms" registry, described
+    TEXT[!MUST]:    in Section 10.2.2.
+
+  SECTION: [Submitters](#section-3)
+    TEXT[!MUST]: In order to enable attribution of each logged
+    TEXT[!MUST]:    certificate or precertificate to its issuer, each submission MUST be
+    TEXT[!MUST]:    accompanied by all additional certificates required to verify the
+    TEXT[!MUST]:    chain up to an accepted trust anchor (Section 5.7).
+    TEXT[!MAY]: The trust anchor
+    TEXT[!MAY]:    (a root or intermediate CA certificate) MAY be omitted from the
+    TEXT[!MAY]:    submission.
+    TEXT[!SHOULD]: The submitter SHOULD validate the
+    TEXT[!SHOULD]:    returned SCT, as described in Section 8.1, if they understand its
+    TEXT[!SHOULD]:    format and they intend to use it directly in a TLS handshake or to
+    TEXT[!SHOULD]:    construct a certificate.
+    TEXT[!MAY]: If the submitter does not need the SCT (for
+    TEXT[!MAY]:    example, the certificate is being submitted simply to make it
+    TEXT[!MAY]:    available in the log), it MAY validate the SCT.
+
+  SECTION: [Precertificates](#section-3.2)
+    TEXT[!MAY]: The CA MAY
+    TEXT[!MAY]:    incorporate the returned SCT in the issued certificate.
+    TEXT[!MUST]:    *  It MUST be DER encoded, as described in [X690].
+    TEXT[!MUST]:    *  SignedData.version MUST be v3(3).
+    TEXT[!MUST]:    *  SignedData.digestAlgorithms MUST be the same as the
+    TEXT[!MUST]:       SignerInfo.digestAlgorithm OID value (see below).
+    TEXT[!MUST]:       -  eContentType MUST be the OID 1.3.101.78.
+    TEXT[!MUST]:       -  eContent MUST contain a TBSCertificate [RFC5280] that will be
+    TEXT[!MUST]:          identical to the TBSCertificate in the issued certificate,
+    TEXT[!MUST]:          except that the Transparency Information (Section 7.1)
+    TEXT[!MUST]:          extension MUST be omitted.
+    TEXT[!MUST]:    *  SignedData.certificates MUST be omitted.
+    TEXT[!MUST]:    *  SignedData.crls MUST be omitted.
+    TEXT[!MUST]:    *  SignedData.signerInfos MUST contain one SignerInfo:
+    TEXT[!MUST]:       -  version MUST be v3(3).
+    TEXT[!MUST]:       -  sid MUST use the subjectKeyIdentifier option.
+    TEXT[!MUST]:       -  digestAlgorithm MUST be one of the hash algorithm OIDs listed
+    TEXT[!MUST]:          in the IANA "Hash Algorithms" registry, described in
+    TEXT[!MUST]:          Section 10.2.1.
+    TEXT[!MUST]:       -  signedAttrs MUST be present and MUST contain two attributes:
+    TEXT[!MUST]:       -  signatureAlgorithm MUST be the same OID as
+    TEXT[!MUST]:          TBSCertificate.signature.
+    TEXT[!MUST]:       -  signature MUST be from the same (root or intermediate) CA that
+    TEXT[!MUST]:          intends to issue the corresponding certificate (see
+    TEXT[!MUST]:          Section 3.2.1).
+    TEXT[!MUST]:       -  unsignedAttrs MUST be omitted.
+
+  SECTION: [Log Format and Operation](#section-4)
+    TEXT[!MUST]:    When it receives and accepts a valid submission, the log MUST return
+    TEXT[!MUST]:    an SCT that corresponds to the submitted certificate or
+    TEXT[!MUST]:    precertificate.
+    TEXT[!SHOULD]: If the log has previously seen this valid
+    TEXT[!SHOULD]:    submission, it SHOULD return the same SCT as it returned before, as
+    TEXT[!SHOULD]:    discussed in Section 11.3.
+    TEXT[!MUST]: Upon producing an SCT, the log MUST fulfill
+    TEXT[!MUST]:    this promise by performing the following actions within a fixed
+    TEXT[!MUST]:    amount of time known as the Maximum Merge Delay (MMD), which is one
+    TEXT[!MUST]:    of the log's parameters (see Section 4.1):
+    TEXT[!SHOULD]:    Log operators SHOULD NOT impose any conditions on retrieving or
+    TEXT[!SHOULD]:    sharing data from the log.
+
+  SECTION: [Log Parameters](#section-4.1)
+    TEXT[!MUST]: Except for the Final STH, each of these parameters MUST
+    TEXT[!MUST]:    be established before the log operator begins to operate the log.
+    TEXT[!MUST]: The base URL MUST be an "https" URL,
+    TEXT[!MUST]:       MAY contain a port, and MAY contain a path with any number of path
+    TEXT[!MUST]:       segments but MUST NOT contain a query string, fragment, or
+    TEXT[!MUST]:       trailing "/".
+    TEXT[!MUST]: A log MUST NOT use the same keypair as any other log.
+    TEXT[!MUST]: This value MUST be
+    TEXT[!MUST]:       provided in the form of a TransItem of type signed_tree_head_v2.
+
+  SECTION: [Evaluating Submissions](#section-4.2)
+    TEXT[!SHOULD]:    If the acceptance criteria are met, the log SHOULD accept the
+    TEXT[!SHOULD]:    submission.
+    TEXT[!MUST]:    The log SHALL allow retrieval of its list of accepted trust anchors
+    TEXT[!MUST]:    (see Section 5.7), each of which is a root or intermediate CA
+    TEXT[!MUST]:    certificate.
+
+  SECTION: [Minimum Acceptance Criteria](#section-4.2.1)
+    TEXT[!MUST]:    To ensure that logged certificates and precertificates are
+    TEXT[!MUST]:    attributable to an accepted trust anchor, to set clear expectations
+    TEXT[!MUST]:    for what monitors would find in the log, and to avoid being
+    TEXT[!MUST]:    overloaded by invalid submissions, the log MUST reject a submission
+    TEXT[!MUST]:    if any of the following conditions are not met:
+    TEXT[!MUST]:    *  The submission, type, and chain inputs MUST be set as described in
+    TEXT[!MUST]:       Section 5.1.
+    TEXT[!MUST]: The log MUST NOT accommodate misordered CA
+    TEXT[!MUST]:       certificates or use any other source of intermediate CA
+    TEXT[!MUST]:       certificates to attempt certification path construction.
+    TEXT[!MUST]:    *  Each of the zero or more intermediate CA certificates in the chain
+    TEXT[!MUST]:       MUST have one or both of the following features:
+    TEXT[!MUST]:    *  Each certificate in the chain MUST fall within the limits imposed
+    TEXT[!MUST]:       by the zero or more Basic Constraints pathLenConstraint values
+    TEXT[!MUST]:       found higher up the chain.
+    TEXT[!MUST]:    *  Precertificate submissions MUST conform to all of the requirements
+    TEXT[!MUST]:       in Section 3.2.
+
+  SECTION: [Discretionary Acceptance Criteria](#section-4.2.2)
+    TEXT[!SHOULD]:    Logs SHOULD limit the length of chain they will accept.
+
+  SECTION: [Log Entries](#section-4.3)
+    TEXT[!MUST]:    If a submission is accepted and an SCT is issued, the accepting log
+    TEXT[!MUST]:    MUST store the entire chain used for verification.
+    TEXT[!MUST]: This chain MUST
+    TEXT[!MUST]:    include the certificate or precertificate itself, the zero or more
+    TEXT[!MUST]:    intermediate CA certificates provided by the submitter, and the trust
+    TEXT[!MUST]:    anchor used to verify the chain (even if it was omitted from the
+    TEXT[!MUST]:    submission).
+    TEXT[!MUST]: The log MUST provide this chain for auditing upon
+    TEXT[!MUST]:    request (see Section 5.6) so that the CA cannot avoid blame by
+    TEXT[!MUST]:    logging a partial or empty chain.
+
+  SECTION: [Log ID](#section-4.4)
+    TEXT[!MUST]:    Each log is identified by an OID, which is one of the log's
+    TEXT[!MUST]:    parameters (see Section 4.1) and which MUST NOT be used to identify
+    TEXT[!MUST]:    any other log.
+    TEXT[!MUST]: A log's operator MUST either allocate the OID
+    TEXT[!MUST]:    themselves or request an OID from the Log ID registry (see
+    TEXT[!MUST]:    Section 10.2.5).
+    TEXT[!MUST]:    The OID used to identify a log is limited such that the DER encoding
+    TEXT[!MUST]:    of its value, excluding the tag and length, MUST be no longer than
+    TEXT[!MUST]:    127 octets.
+
+  SECTION: [Merkle Tree Leaves](#section-4.7)
+    TEXT[!MUST]: The length of the issuer_key_hash MUST match
+    TEXT[!MUST]:    HASH_SIZE.
+
+  SECTION: [Signed Certificate Timestamp (SCT)](#section-4.8)
+    TEXT[!MUST]: This vector
+    TEXT[!MUST]:    MUST NOT include more than one extension with the same
+    TEXT[!MUST]:    extension_type.
+    TEXT[!MUST]: The extensions in the vector MUST be ordered by the
+    TEXT[!MUST]:    value of the extension_type field, smallest value first.
+    TEXT[!SHOULD]: All SCT
+    TEXT[!SHOULD]:    extensions are similar to noncritical X.509v3 extensions (i.e., the
+    TEXT[!SHOULD]:    mustUnderstand field is not set), and a recipient SHOULD ignore any
+    TEXT[!SHOULD]:    extension it does not understand.
+    TEXT[!MAY]: Furthermore, an implementation MAY
+    TEXT[!MAY]:    choose to ignore any extension(s) that it does understand.
+
+  SECTION: [Merkle Tree Head](#section-4.9)
+    TEXT[!MUST]:    The length of NodeHash MUST match HASH_SIZE of the log.
+    TEXT[!MUST]: This vector
+    TEXT[!MUST]:    MUST NOT include more than one extension with the same
+    TEXT[!MUST]:    extension_type.
+    TEXT[!MUST]: The extensions in the vector MUST be ordered by the
+    TEXT[!MUST]:    value of the extension_type field, smallest value first.
+    TEXT[!SHOULD]: If an
+    TEXT[!SHOULD]:    implementation sees an extension that it does not understand, it
+    TEXT[!SHOULD]:    SHOULD ignore that extension.
+    TEXT[!MAY]: Furthermore, an implementation MAY
+    TEXT[!MAY]:    choose to ignore any extension(s) that it does understand.
+
+  SECTION: [Signed Tree Head (STH)](#section-4.10)
+    TEXT[!SHOULD]:    Periodically, each log SHOULD sign its current tree head information
+    TEXT[!SHOULD]:    (see Section 4.9) to produce an STH.
+    TEXT[!MUST]: When a client requests a log's
+    TEXT[!MUST]:    latest STH (see Section 5.2), the log MUST return an STH that is no
+    TEXT[!MUST]:    older than the log's MMD.
+    TEXT[!MUST]: However, since STHs could be used to mark
+    TEXT[!MUST]:    individual clients (by producing a new STH for each query), a log
+    TEXT[!MUST]:    MUST NOT produce STHs more frequently than its parameters declare
+    TEXT[!MUST]:    (see Section 4.1).
+    TEXT[!MUST]: In general, there is no need to produce a new STH
+    TEXT[!MUST]:    unless there are new entries in the log; however, in the event that a
+    TEXT[!MUST]:    log does not accept any submissions during an MMD period, the log
+    TEXT[!MUST]:    MUST sign the same Merkle Tree Hash with a fresh timestamp.
+    TEXT[!MUST]:    The timestamp in tree_head MUST be at least as recent as the most
+    TEXT[!MUST]:    recent SCT timestamp in the tree.
+    TEXT[!MUST]: Each subsequent timestamp MUST be
+    TEXT[!MUST]:    more recent than the timestamp of the previous update.
+
+  SECTION: [Shutting Down a Log](#section-4.13)
+    TEXT[!SHOULD]: In order to avoid that, the
+    TEXT[!SHOULD]:    following actions SHOULD be taken:
+
+  SECTION: [Log Client Messages](#section-5)
+    TEXT[!SHOULD]: Any fields that are not
+    TEXT[!SHOULD]:    understood SHOULD be ignored.
+    TEXT[!MUST]: Front ends MUST only serve
+    TEXT[!MUST]:    data that is free of gaps (that is, for example, no front end will
+    TEXT[!MUST]:    respond with an STH unless it is also able to prove consistency from
+    TEXT[!MUST]:    all log entries logged within that STH).
+    TEXT[!MUST]:    If the log is unable to process a client's request, it MUST return an
+    TEXT[!MUST]:    HTTP response code of 4xx/5xx (see [RFC7231]), and, in place of the
+    TEXT[!MUST]:    responses outlined in the subsections below, the body SHOULD be a
+    TEXT[!MUST]:    JSON problem details object (see Section 3 of [RFC7807]) containing:
+    TEXT[!SHOULD]:    Clients SHOULD treat 500 Internal Server Error and 503 Service
+    TEXT[!SHOULD]:    Unavailable responses as transient failures and MAY retry the same
+    TEXT[!SHOULD]:    request without modification at a later date.
+    TEXT[!MAY]: Note that in the case
+    TEXT[!MAY]:    of a 503 response, the log MAY include a Retry-After header field per
+    TEXT[!MAY]:    [RFC7231] in order to request a minimum time for the client to wait
+    TEXT[!MAY]:    before retrying the request.
+    TEXT[!SHOULD]:    Clients SHOULD treat any 4xx error as a problem with the request and
+    TEXT[!SHOULD]:    not attempt to resubmit without some modification to the request.
+    TEXT[!MAY]:    The full status code MAY provide additional details.
+
+  SECTION: [Submit Entry to Log](#section-5.1)
+    TEXT[!SHOULD]:       If the submitted entry is immediately appended to (or already
+    TEXT[!SHOULD]:       exists in) this log's tree, then the log SHOULD also output:
+    TEXT[!MUST]: It MUST NOT construe this as an error.
+    TEXT[!MUST]:    If a log detects bad encoding in a chain that otherwise verifies
+    TEXT[!MUST]:    correctly, then the log MUST either log the certificate or return the
+    TEXT[!MUST]:    "badCertificate" error.
+    TEXT[!MUST]: If the certificate is logged, an SCT MUST be
+    TEXT[!MUST]:    issued.
+    TEXT[!MUST]:    If submission is an accepted trust anchor whose certifier is neither
+    TEXT[!MUST]:    an accepted trust anchor nor the first element of chain, then the log
+    TEXT[!MUST]:    MUST return the "unknownAnchor" error.
+    TEXT[!SHOULD]:    If the returned sct is intended to be provided to TLS clients, then
+    TEXT[!SHOULD]:    sth and inclusion (if returned) SHOULD also be provided to TLS
+    TEXT[!SHOULD]:    clients.
+
+  SECTION: [Retrieve Merkle Consistency Proof between Two STHs](#section-5.3)
+    TEXT[!MUST]:    Outputs:
+    TEXT[!MUST]:       consistency:  A base64-encoded TransItem of type
+    TEXT[!MUST]:          consistency_proof_v2 whose tree_size_1 MUST match the first
+    TEXT[!MUST]:          input.
+    TEXT[!MUST]: If the sth output is omitted, then tree_size_2 MUST
+    TEXT[!MUST]:          match the second input.
+    TEXT[!MUST]: If first and second are equal and
+    TEXT[!MUST]:          correspond to a known STH, the returned consistency proof MUST
+    TEXT[!MUST]:          be empty (a consistency_path array with zero elements).
+
+  SECTION: [Retrieve Merkle Inclusion Proof, STH, and Consistency Proof by](#section-5.5)
+    TEXT[!MUST]: It is also possible for none to be true; in
+    TEXT[!MUST]:    which case, the front end MUST return an empty response.
+
+  SECTION: [Retrieve Entries and STH from Log](#section-5.6)
+    TEXT[!MUST]: All leaves MUST be v2.
+    TEXT[!MUST]: However, a compliant v2
+    TEXT[!MUST]:    client MUST NOT construe an unrecognized TransItem type as an error.
+    TEXT[!SHOULD]:    The start and end parameters SHOULD be within the range 0 <= x <
+    TEXT[!SHOULD]:    tree_size, as returned by get-sth in Section 5.2.
+    TEXT[!MUST]:    The start parameter MUST be less than or equal to the end parameter.
+    TEXT[!MUST]:    Each submitted_entry output parameter MUST include the trust anchor
+    TEXT[!MUST]:    that the log used to verify the submission, even if that trust anchor
+    TEXT[!MUST]:    was not provided to submit-entry (see Section 5.1).
+    TEXT[!MUST]: If the
+    TEXT[!MUST]:    submission does not certify itself, then the first element of chain
+    TEXT[!MUST]:    MUST be present and MUST certify the submission.
+    TEXT[!MUST]:    Log servers MUST honor requests where 0 <= start < tree_size and end
+    TEXT[!MUST]:    >= tree_size by returning a partial response covering only the valid
+    TEXT[!MUST]:    entries in the specified range.
+    TEXT[!MAY]:    Logs MAY restrict the number of entries that can be retrieved per
+    TEXT[!MAY]:    get-entries request.
+    TEXT[!MUST]: If a client requests more than the permitted
+    TEXT[!MUST]:    number of entries, the log SHALL return the maximum number of entries
+    TEXT[!MUST]:    permissible.
+    TEXT[!MUST]: These entries SHALL be sequential beginning with the
+    TEXT[!MUST]:    entry specified by start.
+    TEXT[!MUST]: In this case, it MUST return an empty
+    TEXT[!MUST]:    entries array.
+    TEXT[!MUST]:    In any case, the log server MUST return the latest STH it knows
+    TEXT[!MUST]:    about.
+
+  SECTION: [TLS Servers](#section-6)
+    TEXT[!MUST]:    CT-using TLS servers MUST use at least one of the mechanisms
+    TEXT[!MUST]:    described below to present one or more SCTs from one or more logs to
+    TEXT[!MUST]:    each TLS client during full TLS handshakes, when requested by the
+    TEXT[!MUST]:    client, where each SCT corresponds to the server certificate.
+    TEXT[!SHOULD]: (Of
+    TEXT[!SHOULD]:    course, a server can only send a TLS extension if the client has
+    TEXT[!SHOULD]:    specified it first.)  Servers SHOULD also present corresponding
+    TEXT[!SHOULD]:    inclusion proofs and STHs.
+
+  SECTION: [Multiple SCTs](#section-6.2)
+    TEXT[!SHOULD]:    CT-using TLS servers SHOULD send SCTs from multiple logs because:
+
+  SECTION: [Presenting SCTs, Inclusions Proofs, and STHs](#section-6.4)
+    TEXT[!MUST]:    In each TransItemList that is sent during a TLS handshake, the TLS
+    TEXT[!MUST]:    server MUST include a TransItem structure of type x509_sct_v2 or
+    TEXT[!MUST]:    precert_sct_v2.
+    TEXT[!SHOULD]: Therefore, if the TLS server can obtain them, it SHOULD
+    TEXT[!SHOULD]:    also include TransItems of type inclusion_proof_v2 and
+    TEXT[!SHOULD]:    signed_tree_head_v2 in the TransItemList.
+
+  SECTION: [transparency_info TLS Extension](#section-6.5)
+    TEXT[!MUST]:    *  The TLS server MUST verify that the received extension_data is
+    TEXT[!MUST]:       empty.
+    TEXT[!MUST]:    *  The TLS server MUST construct a TransItemList of relevant
+    TEXT[!MUST]:       TransItems (see Section 6.4), which SHOULD omit any TransItems
+    TEXT[!MUST]:       that are already embedded in the server certificate or the stapled
+    TEXT[!MUST]:       OCSP response (see Section 7.1).
+    TEXT[!MUST]: If the constructed TransItemList
+    TEXT[!MUST]:       is not empty, then the TLS server MUST include the
+    TEXT[!MUST]:       transparency_info extension with the extension_data set to this
+    TEXT[!MUST]:       TransItemList.
+    TEXT[!SHOULD]: If the list is empty, then the server SHOULD omit
+    TEXT[!SHOULD]:       the extension_data element but MAY send it with an empty array.
+    TEXT[!MUST]:    TLS servers MUST only include this extension in the following
+    TEXT[!MUST]:    messages:
+    TEXT[!MUST]:    TLS servers MUST NOT process or include this extension when a TLS
+    TEXT[!MUST]:    session is resumed, since session resumption uses the original
+    TEXT[!MUST]:    session information.
+
+  SECTION: [Transparency Information X.509v3 Extension](#section-7.1)
+    TEXT[!SHOULD]:    The Transparency Information X.509v3 extension, which has OID
+    TEXT[!SHOULD]:    1.3.101.75 and SHOULD be noncritical, contains one or more TransItem
+    TEXT[!SHOULD]:    structures in a TransItemList.
+    TEXT[!MAY]: This extension MAY be included in
+    TEXT[!MAY]:    OCSP responses (see Section 7.1.1) and certificates (see
+    TEXT[!MAY]:    Section 7.1.2).
+    TEXT[!MUST]: Since [RFC5280] requires the extnValue field (an
+    TEXT[!MUST]:    OCTET STRING) of each X.509v3 extension to include the DER encoding
+    TEXT[!MUST]:    of an ASN.1 value, a TransItemList MUST NOT be included directly.
+    TEXT[!MUST]:    Instead, it MUST be wrapped inside an additional OCTET STRING, which
+    TEXT[!MUST]:    is then put into the extnValue field:
+
+  SECTION: [OCSP Response Extension](#section-7.1.1)
+    TEXT[!MAY]:    A certification authority MAY include a Transparency Information
+    TEXT[!MAY]:    X.509v3 extension in the singleExtensions of a SingleResponse in an
+    TEXT[!MAY]:    OCSP response.
+    TEXT[!MUST]: All included SCTs and inclusion proofs MUST be for
+    TEXT[!MUST]:    the certificate identified by the certID of that SingleResponse or
+    TEXT[!MUST]:    for a precertificate that corresponds to that certificate.
+
+  SECTION: [Certificate Extension](#section-7.1.2)
+    TEXT[!MAY]:    A certification authority MAY include a Transparency Information
+    TEXT[!MAY]:    X.509v3 extension in a certificate.
+    TEXT[!MUST]: All included SCTs and inclusion
+    TEXT[!MUST]:    proofs MUST be for a precertificate that corresponds to this
+    TEXT[!MUST]:    certificate.
+
+  SECTION: [TLS Feature X.509v3 Extension](#section-7.2)
+    TEXT[!SHOULD]:    A certification authority SHOULD NOT issue any certificate that
+    TEXT[!SHOULD]:    identifies the transparency_info TLS extension in a TLS feature
+    TEXT[!SHOULD]:    extension [RFC7633], because TLS servers are not required to support
+    TEXT[!SHOULD]:    the transparency_info TLS extension in order to participate in CT
+    TEXT[!SHOULD]:    (see Section 6).
+
+  SECTION: [Receiving SCTs and Inclusion Proofs](#section-8.1.1)
+    TEXT[!MUST]: CT-using TLS clients MUST implement all of the three
+    TEXT[!MUST]:    mechanisms by which TLS servers may present SCTs (see Section 6).
+    TEXT[!SHOULD]:    TLS clients that support the transparency_info TLS extension (see
+    TEXT[!SHOULD]:    Section 6.5) SHOULD include it in ClientHello messages, with empty
+    TEXT[!SHOULD]:    extension_data.
+    TEXT[!MUST]: If a TLS server includes the transparency_info TLS
+    TEXT[!MUST]:    extension when resuming a TLS session, the TLS client MUST abort the
+    TEXT[!MUST]:    handshake.
+
+  SECTION: [Validating SCTs](#section-8.1.3)
+    TEXT[!MUST]:    In order to make use of a received SCT, the TLS client MUST first
+    TEXT[!MUST]:    validate it as follows:
+
+  SECTION: [Fetching Inclusion Proofs](#section-8.1.4)
+    TEXT[!MAY]:    When a TLS client has validated a received SCT but does not yet
+    TEXT[!MAY]:    possess a corresponding inclusion proof, the TLS client MAY request
+    TEXT[!MAY]:    the inclusion proof directly from a log using get-proof-by-hash
+    TEXT[!MAY]:    (Section 5.4) or get-all-by-hash (Section 5.5).
+
+  SECTION: [Validating Inclusion Proofs](#section-8.1.5)
+    TEXT[!SHOULD]:    When a TLS client has received, or fetched, an inclusion proof (and
+    TEXT[!SHOULD]:    an STH), it SHOULD proceed to verify the inclusion proof to the
+    TEXT[!SHOULD]:    provided STH.
+    TEXT[!SHOULD]: The TLS client SHOULD also verify consistency between
+    TEXT[!SHOULD]:    the provided STH and an STH it knows about.
+    TEXT[!MAY]:    If the TLS client holds an STH that predates the SCT, it MAY, in the
+    TEXT[!MAY]:    process of auditing, request a new STH from the log (Section 5.2) and
+    TEXT[!MAY]:    then verify it by requesting a consistency proof (Section 5.3).
+
+  SECTION: [Evaluating Compliance](#section-8.1.6)
+    TEXT[!MUST]: Therefore, a TLS client MUST NOT
+    TEXT[!MUST]:    evaluate compliance if it did not include both the transparency_info
+    TEXT[!MUST]:    and status_request TLS extensions in the ClientHello.
+
+  SECTION: [Monitor](#section-8.2)
+    TEXT[!MUST]:    A monitor MUST at least inspect every new entry in every log it
+    TEXT[!MUST]:    watches, and it MAY also choose to keep copies of entire logs.
+    TEXT[!SHOULD]:    To inspect all of the existing entries, the monitor SHOULD follow
+    TEXT[!SHOULD]:    these steps once for each log:
+    TEXT[!SHOULD]:    To inspect new entries, the monitor SHOULD follow these steps
+    TEXT[!SHOULD]:    repeatedly for each log:
+
+  SECTION: [Algorithm Agility](#section-9)
+    TEXT[!MUST]:    If it should become necessary to deprecate an algorithm used by a
+    TEXT[!MUST]:    live log, then the log MUST be frozen, as specified in Section 4.13,
+    TEXT[!MUST]:    and a new log SHOULD be started.
+    TEXT[!SHOULD]: Certificates in the frozen log that
+    TEXT[!SHOULD]:    have not yet expired and require new SCTs SHOULD be submitted to the
+    TEXT[!SHOULD]:    new log and the SCTs from that log used instead.
+
+  SECTION: [Log IDs](#section-10.2.5)
+    TEXT[!MUST]:    Each application for the allocation of a Log ID MUST be accompanied
+    TEXT[!MUST]:    by:
+
+  SECTION: [Misbehaving Logs](#section-11.3)
+    TEXT[!SHOULD]: Logs SHOULD mitigate this risk by either:

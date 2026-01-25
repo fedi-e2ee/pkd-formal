@@ -1,0 +1,32 @@
+'$schema' = "https://awslabs.github.io/duvet/config/v0.4.0.json"
+
+# ProVerif formal proofs
+[[source]]
+pattern = "proofs/**/*.pv"
+
+[[source]]
+pattern = "traceability/implementations/pkd-crypto/src/**/*.php"
+
+[[source]]
+pattern = "traceability/implementations/pkd-server-php/src/**/*.php"
+
+[[source]]
+pattern = "traceability/implementations/pkd-client-php/src/**/*.php"
+
+[[specification]]
+source = "https://raw.githubusercontent.com/fedi-e2ee/public-key-directory-specification/refs/heads/main/Specification.md"
+
+[[specification]]
+source = "https://raw.githubusercontent.com/fedi-e2ee/public-key-directory-specification/refs/heads/main/Architecture.md"
+
+# RFC 9162: Certificate Transparency (Merkle tree structure)
+[[specification]]
+source = "https://www.rfc-editor.org/rfc/rfc9162.txt"
+
+[report.html]
+enabled = true
+path = "traceability-report/index.html"
+
+# Enable snapshots to prevent requirement coverage regressions
+[report.snapshot]
+enabled = true

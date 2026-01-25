@@ -1,0 +1,165 @@
+name: Verify Proofs and Traceability
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '03 11 * * 5'
+  workflow_dispatch:
+
+jobs:
+  verify-proofs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update apt cache
+        run: sudo apt-get update
+
+      - name: Install Linux packages
+        run: sudo apt-get install libgtk2.0-dev
+
+      - name: Checkout pkd-formal
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Checkout PKD specification
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          repository: fedi-e2ee/public-key-directory-specification
+          path: specifications/public-key-directory-specification
+
+      - name: Checkout pkd-crypto
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          repository: fedi-e2ee/pkd-crypto
+          path: implementations/pkd-crypto
+
+      - name: Checkout pkd-server-php
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          repository: fedi-e2ee/pkd-server-php
+          path: implementations/pkd-server-php
+
+      - name: Checkout pkd-client-php
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          repository: fedi-e2ee/pkd-client-php
+          path: implementations/pkd-client-php
+
+      - name: Set up OCaml and opam
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ocaml opam
+          opam init --disable-sandboxing -y
+          eval "$(opam env)"
+          opam update
+
+      - name: Install ProVerif
+        run: |
+          eval "$(opam env)"
+          opam install -y proverif
+          opam var bin >> "$GITHUB_PATH"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9  # v1
+        with:
+          toolchain: stable
+
+      - name: Cache duvet
+        id: cache-duvet
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/duvet
+          key: ${{ runner.os }}-duvet-0.4.1
+
+      - name: Install duvet
+        if: steps.cache-duvet.outputs.cache-hit != 'true'
+        run: cargo install duvet --version 0.4.1 --locked
+
+      - name: Verify ProVerif proofs
+        run: |
+          cd proofs
+          echo "Verifying attribute encryption proof..."
+          proverif pkd_attribute_encryption.pv | tee attr_encryption_result.txt
+          if ! grep -q "RESULT.*is true" attr_encryption_result.txt; then
+            echo -e "\033[0;31mAttribute encryption proof FAILED\033[0m"
+            exit 1
+          fi
+          echo -e "\033[0;32mAttribute encryption proof VERIFIED\033[0m"
+
+          echo "Verifying Merkle tree proof..."
+          proverif pkd_merkle_tree.pv | tee merkle_tree_result.txt
+          if ! grep -q "RESULT.*is true" merkle_tree_result.txt; then
+            echo -e "\033[0;31mMerkle tree proof FAILED\033[0m"
+            exit 1
+          fi
+          echo -e "\033[0;32mMerkle tree proof VERIFIED\033[0m"
+
+          echo "Verifying protocol state machine proof..."
+          proverif pkd_protocol_state_machine.pv | tee state_machine_result.txt
+          if ! grep -q "RESULT.*is true" state_machine_result.txt; then
+            echo "\033[0;31mProtocol state machine proof FAILED\033[0m"
+            exit 1
+          fi
+          echo "\033[0;32mProtocol state machine proof VERIFIED\033[0m"
+
+          echo "Verifying RevokeKeyThirdParty proof..."
+          proverif pkd_revoke_key_third_party.pv | tee revoke_third_party_result.txt
+          if ! grep -q "RESULT.*is true" revoke_third_party_result.txt; then
+            echo "\033[0;31mRevokeKeyThirdParty proof FAILED\033[0m"
+            exit 1
+          fi
+          echo "\033[0;32mRevokeKeyThirdParty proof VERIFIED\033[0m"
+
+          echo "Verifying MoveIdentity proof..."
+          proverif pkd_move_identity.pv | tee move_identity_result.txt
+          if ! grep -q "RESULT.*is true" move_identity_result.txt; then
+            echo "\033[0;31mMoveIdentity proof FAILED\033[0m"
+            exit 1
+          fi
+          echo "\033[0;32mMoveIdentity proof VERIFIED\033[0m"
+
+          echo "Verifying PAE encoding proof..."
+          proverif pkd_pae_encoding.pv | tee pae_encoding_result.txt
+          if ! grep -q "RESULT.*is true" pae_encoding_result.txt; then
+            echo "\033[0;31mPAE encoding proof FAILED\033[0m"
+            exit 1
+          fi
+          echo "\033[0;32mPAE encoding proof VERIFIED\033[0m"
+
+          echo "Verifying BurnDown authorization proof..."
+          proverif pkd_burn_down.pv | tee burn_down_result.txt
+          if ! grep -q "RESULT.*is true" burn_down_result.txt; then
+            echo "\033[0;31mBurnDown proof FAILED\033[0m"
+            exit 1
+          fi
+          echo "\033[0;32mBurnDown proof VERIFIED\033[0m"
+
+          echo ""
+          echo "\033[0;32mAll ProVerif proofs VERIFIED successfully\033[0m"
+
+      - name: Copy specification to traceability directory
+        run: |
+          mkdir -p traceability/specifications
+          cp -r specifications/public-key-directory-specification traceability/specifications/
+
+      - name: Copy implementations to traceability directory
+        run: |
+          mkdir -p traceability/implementations
+          cp -r implementations/pkd-crypto traceability/implementations/
+          cp -r implementations/pkd-server-php traceability/implementations/
+          cp -r implementations/pkd-client-php traceability/implementations/
+
+      - name: Generate duvet traceability report
+        run: |
+          # Pre-download specifications that duvet might have trouble fetching
+          mkdir -p .duvet/specifications/www.rfc-editor.org/rfc/
+          curl -sS -o .duvet/specifications/www.rfc-editor.org/rfc/rfc9162.txt https://www.rfc-editor.org/rfc/rfc9162.txt
+          duvet report
+      - name: Check duvet report generated
+        run: |
+          if [ ! -f traceability-report/index.html ]; then
+            echo -e "\033[0;31mDuvet report generation FAILED\033[0m"
+            exit 1
+          fi
+          echo -e "\033[0;32mDuvet traceability report generated successfully\033[0m"

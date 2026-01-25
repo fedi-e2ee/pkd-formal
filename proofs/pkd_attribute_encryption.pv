@@ -1,0 +1,221 @@
+(*= traceability/specifications/public-key-directory-specification/Specification.md#message-attribute-encryption-algorithm *)
+(*# Encrypt the plaintext attribute using Stream, with the nonce set to n, to obtain the ciphertext, c. *)
+
+(* TYPE DECLARATIONS *)
+
+type key.                      (* Symmetric keys *)
+type nonce.                    (* Nonces for AES-CTR *)
+type attribute_name.           (* Attribute identifiers *)
+type merkle_root.              (* Merkle tree roots *)
+type commitment.               (* Argon2id commitment output *)
+type mac_tag.                  (* HMAC tags *)
+type random_value.             (* 256-bit random values *)
+type version.                  (* Protocol version *)
+type ikm.                      (* Input key material *)
+
+(* CHANNELS  *)
+
+free c: channel.               (* Public network channel *)
+free private_db: channel [private].  (* PKD internal storage *)
+
+(* CONSTANTS *)
+
+const VERSION_1: version.
+const ATTR_ACTOR: attribute_name.
+const ATTR_PUBLIC_KEY: attribute_name.
+const ATTR_AUX_DATA: attribute_name.
+
+(* CRYPTOGRAPHIC FUNCTIONS *)
+
+(* --- HKDF Key Derivation --- *)
+
+(* Derive encryption key from IKM, version, random, and attribute name *)
+fun kdf_enc_key(ikm, version, random_value, attribute_name): key.
+
+(* Derive nonce from IKM, version, random, and attribute name *)
+fun kdf_nonce(ikm, version, random_value, attribute_name): nonce.
+
+(* Derive authentication key from IKM, version, random, and attribute name *)
+fun kdf_auth_key(ikm, version, random_value, attribute_name): key.
+
+(* --- AES-256-CTR Stream Cipher --- *)
+
+(* Symmetric encryption *)
+fun aes_ctr_enc(key, nonce, bitstring): bitstring.
+
+(* Symmetric decryption - inverse of encryption *)
+reduc forall k: key, n: nonce, m: bitstring;
+  aes_ctr_dec(k, n, aes_ctr_enc(k, n, m)) = m.
+
+(* --- HMAC-SHA512 (truncated) --- *)
+
+fun hmac(key, bitstring): mac_tag.
+
+(* MAC verification *)
+reduc forall k: key, m: bitstring;
+  hmac_verify(k, m, hmac(k, m)) = true.
+
+(* --- SHA-512 Hash --- *)
+
+fun hash(bitstring): bitstring.
+
+(* Derive commitment salt *)
+fun derive_salt(version, random_value, merkle_root, attribute_name): bitstring.
+
+(* --- Argon2id Commitment --- *)
+
+fun argon2id_commit(bitstring, bitstring): commitment.
+
+(* Commitment verification - deterministic *)
+reduc forall pwd: bitstring, salt: bitstring;
+  verify_commitment(argon2id_commit(pwd, salt), pwd, salt) = true.
+
+(* COMPOSITE FUNCTIONS FOR THE SCHEME *)
+
+(* Compute plaintext commitment *)
+letfun compute_commitment(a: attribute_name, p: bitstring, m: merkle_root, s: bitstring) =
+  (* l = len(m) || m || len(a) || a || len(p) || p - simplified as concatenation *)
+  let l = (m, a, p) in
+  argon2id_commit(l, s).
+
+(* Ciphertext structure: (version, random, commitment, mac_tag, encrypted_data) *)
+fun make_ciphertext(version, random_value, commitment, mac_tag, bitstring): bitstring [data].
+
+(* Parse ciphertext *)
+reduc forall v: version, r: random_value, q: commitment, t: mac_tag, c: bitstring;
+  parse_ciphertext(make_ciphertext(v, r, q, t, c)) = (v, r, q, t, c).
+
+(* ENCRYPTION PROCESS *)
+
+letfun encrypt(ikm_val: ikm, a: attribute_name, p: bitstring, m: merkle_root) =
+  let v = VERSION_1 in
+  new r: random_value;
+
+  (* Derive keys *)
+  let Ek = kdf_enc_key(ikm_val, v, r, a) in
+  let n = kdf_nonce(ikm_val, v, r, a) in
+  let Ak = kdf_auth_key(ikm_val, v, r, a) in
+
+  (* Derive commitment salt *)
+  let s = derive_salt(v, r, m, a) in
+
+  (* Compute commitment *)
+  let Q = compute_commitment(a, p, m, s) in
+
+  (* Encrypt plaintext *)
+  let c = aes_ctr_enc(Ek, n, p) in
+
+  (* Compute MAC over (v, r, a, c, Q) *)
+  let mac_input = (v, r, a, c, Q) in
+  let t = hmac(Ak, mac_input) in
+
+  (* Return ciphertext *)
+  make_ciphertext(v, r, Q, t, c).
+
+(* DECRYPTION PROCESS *)
+
+letfun decrypt(ikm_val: ikm, a: attribute_name, ct: bitstring, m: merkle_root) =
+  let (v: version, r: random_value, Q: commitment, t: mac_tag, c: bitstring) =
+    parse_ciphertext(ct) in
+
+  (* Check version *)
+  if v = VERSION_1 then
+
+  (* Derive authentication key *)
+  let Ak = kdf_auth_key(ikm_val, v, r, a) in
+
+  (* Verify MAC *)
+  let mac_input = (v, r, a, c, Q) in
+  if hmac_verify(Ak, mac_input, t) = true then
+
+  (* Derive encryption key and nonce *)
+  let Ek = kdf_enc_key(ikm_val, v, r, a) in
+  let n = kdf_nonce(ikm_val, v, r, a) in
+
+  (* Decrypt *)
+  let p = aes_ctr_dec(Ek, n, c) in
+
+  (* Derive commitment salt and verify commitment *)
+  let s = derive_salt(v, r, m, a) in
+  if verify_commitment(Q, (m, a, p), s) = true then
+  p.
+
+(* EVENTS FOR SECURITY PROPERTIES *)
+
+event EncryptedAttribute(attribute_name, bitstring, merkle_root).
+event DecryptedAttribute(attribute_name, bitstring, merkle_root).
+event StoredCiphertext(bitstring).
+event VerifiedCiphertext(bitstring).
+event CommitmentCreated(commitment, bitstring).
+event CommitmentVerified(commitment, bitstring).
+
+(* SECURITY QUERIES *)
+
+(* --- Query 1: Secrecy of Plaintext ---
+   The plaintext should not be derivable by the attacker without the IKM *)
+free secret_plaintext: bitstring [private].
+query attacker(secret_plaintext).
+
+(* --- Query 2: Authentication / Integrity ---
+   If decryption succeeds, the plaintext was encrypted by a legitimate party *)
+query a: attribute_name, p: bitstring, m: merkle_root;
+  event(DecryptedAttribute(a, p, m)) ==> event(EncryptedAttribute(a, p, m)).
+
+(* --- Query 3: Commitment Binding ---
+   A commitment uniquely identifies the plaintext *)
+query q: commitment, p1: bitstring, p2: bitstring;
+  event(CommitmentVerified(q, p1)) && event(CommitmentVerified(q, p2)) ==> p1 = p2.
+
+(* --- Query 4: No Ciphertext Forgery ---
+   Any verified ciphertext was previously stored legitimately *)
+query ct: bitstring;
+  event(VerifiedCiphertext(ct)) ==> event(StoredCiphertext(ct)).
+
+(* HONEST PROCESSES *)
+
+(* --- Client Process: Encrypts attributes and sends to PKD --- *)
+let Client(ikm_val: ikm, m: merkle_root) =
+  (* Encrypt a secret attribute *)
+  let a = ATTR_ACTOR in
+  let p = secret_plaintext in
+  let ct = encrypt(ikm_val, a, p, m) in
+  event EncryptedAttribute(a, p, m);
+  event StoredCiphertext(ct);
+  out(c, ct).
+
+(* --- PKD Server Process: Stores and serves ciphertexts --- *)
+let PKD_Server(ikm_val: ikm) =
+  (* Receive ciphertext from network *)
+  in(c, (ct: bitstring, a: attribute_name, m: merkle_root));
+
+  (* Attempt decryption to verify validity *)
+  let p = decrypt(ikm_val, a, ct, m) in
+  event VerifiedCiphertext(ct);
+  event DecryptedAttribute(a, p, m);
+
+  (* Store and serve the ciphertext *)
+  out(private_db, ct);
+  out(c, ct).
+
+(* --- PKD Query Process: Responds to queries with plaintext --- *)
+let PKD_Query(ikm_val: ikm) =
+  (* Receive query for a ciphertext *)
+  in(c, (ct: bitstring, a: attribute_name, m: merkle_root));
+
+  (* Decrypt and return plaintext if valid *)
+  let p = decrypt(ikm_val, a, ct, m) in
+  out(c, p).
+
+(* MAIN PROCESS *)
+
+process
+  (* Generate shared input key material *)
+  new ikm_val: ikm;
+  new m: merkle_root;
+
+  (* Run client and server processes *)
+  (
+    !Client(ikm_val, m) |
+    !PKD_Server(ikm_val) |
+    !PKD_Query(ikm_val)
+  )
