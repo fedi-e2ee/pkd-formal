@@ -1,5 +1,9 @@
 # Formal Methods and the Public Key Directory
 
+This repository contains ProVerif models of the [Public Key Directory specification](https://github.com/fedi-e2ee/public-key-directory-specification)
+and uses [Duvet](https://github.com/awslabs/duvet) to ensure the specification requiremments are satisfied by 
+the known implementations. 
+
 ## Running Proofs
 
 ### Prerequisites
