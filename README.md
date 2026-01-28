@@ -1,5 +1,7 @@
 # Formal Methods and the Public Key Directory
 
+[![Verify Proofs and Traceability](https://github.com/fedi-e2ee/pkd-formal/actions/workflows/verify.yml/badge.svg)](https://github.com/fedi-e2ee/pkd-formal/actions/workflows/verify.yml)
+
 This repository contains ProVerif models of the [Public Key Directory specification](https://github.com/fedi-e2ee/public-key-directory-specification)
 and uses [Duvet](https://github.com/awslabs/duvet) to ensure the specification requiremments are satisfied by 
 the known implementations. 
