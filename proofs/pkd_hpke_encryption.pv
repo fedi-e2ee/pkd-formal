@@ -1,7 +1,7 @@
-(*= traceability/specifications/public-key-directory-specification/Specification.md#protocol-messages *)
+(*= https://raw.githubusercontent.com/fedi-e2ee/public-key-directory-specification/refs/heads/main/Specification.md#protocol-messages *)
 (*# Protocol messages that originate client-side MUST be encrypted using HPKE. *)
 
-(*= traceability/specifications/public-key-directory-specification/Specification.md#cryptography-protocols *)
+(*= https://raw.githubusercontent.com/fedi-e2ee/public-key-directory-specification/refs/heads/main/Specification.md#cryptography-protocols *)
 (*# HPKE Suite: DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, ChaCha20Poly1305 *)
 
 (*

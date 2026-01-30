@@ -1,4 +1,4 @@
-(*= traceability/specifications/public-key-directory-specification/Specification.md#burndown *)
+(*= https://raw.githubusercontent.com/fedi-e2ee/public-key-directory-specification/refs/heads/main/Specification.md#burndown *)
 (*# BurnDown: Instance operator privilege to delete actor's keys *)
 
 (* TYPE DECLARATIONS *)

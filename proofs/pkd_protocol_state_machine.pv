@@ -1,7 +1,7 @@
-(*= traceability/specifications/public-key-directory-specification/Specification.md#addkey *)
+(*= https://raw.githubusercontent.com/fedi-e2ee/public-key-directory-specification/refs/heads/main/Specification.md#addkey *)
 (*# The first AddKey for any given Actor MUST be self-signed by the same public key being added. *)
 
-(*= traceability/specifications/public-key-directory-specification/Specification.md#revokekey *)
+(*= https://raw.githubusercontent.com/fedi-e2ee/public-key-directory-specification/refs/heads/main/Specification.md#revokekey *)
 (*# Attempting to issue a RevokeKey MUST fail unless there is another public key associated with this Actor. *)
 
 (* TYPE DECLARATIONS *)

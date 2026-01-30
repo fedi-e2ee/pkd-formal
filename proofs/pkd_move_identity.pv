@@ -1,4 +1,4 @@
-(*= traceability/specifications/public-key-directory-specification/Specification.md#moveidentity *)
+(*= https://raw.githubusercontent.com/fedi-e2ee/public-key-directory-specification/refs/heads/main/Specification.md#moveidentity *)
 (*# MoveIdentity: Migrate actor identity from old-actor to new-actor *)
 
 (* ============================================================================

@@ -1,7 +1,7 @@
-(*= traceability/specifications/public-key-directory-specification/Specification.md#addauxdata *)
+(*= https://raw.githubusercontent.com/fedi-e2ee/public-key-directory-specification/refs/heads/main/Specification.md#addauxdata *)
 (*# AddAuxData messages append extension-specific data to an actor's record. *)
 
-(*= traceability/specifications/public-key-directory-specification/Specification.md#revokeauxdata *)
+(*= https://raw.githubusercontent.com/fedi-e2ee/public-key-directory-specification/refs/heads/main/Specification.md#revokeauxdata *)
 (*# RevokeAuxData revokes a single auxiliary data record. *)
 
 (* TYPE DECLARATIONS *)

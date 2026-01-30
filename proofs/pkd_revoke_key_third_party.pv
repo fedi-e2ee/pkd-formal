@@ -1,4 +1,4 @@
-(*= traceability/specifications/public-key-directory-specification/Specification.md#revokekeythirdparty *)
+(*= https://raw.githubusercontent.com/fedi-e2ee/public-key-directory-specification/refs/heads/main/Specification.md#revokekeythirdparty *)
 (*# RevokeKeyThirdParty: Emergency key revocation using a revocation token *)
 
 (* TYPE DECLARATIONS *)

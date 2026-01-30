@@ -198,14 +198,19 @@ SPECIFICATION: [Public Key Directory Specification](https://raw.githubuserconten
     TEXT[!MUST]: `BurnDown` messages also **MUST NOT** be sent via ActivityPub, and therefore are not generated client-side.
     TEXT[!MUST]: When encryption is used, the Protocol Message **MUST** be serialized as a JSON string and then encrypted according to
     TEXT[!MUST]: the specific HPKE cipher suite advertised by the Public Key Directory, using the given public key.
-    TEXT[!SHOULD]: Users **MAY** pad the plaintext before encryption with additional whitespace to their desired length, but **SHOULD**
-    TEXT[!SHOULD]: keep their plaintext JSON blobs smaller than 16 MiB (16,777,216 bytes).
+
+  SECTION: [Plaintext Padding for Length Hiding](#plaintext-padding-for-length-hiding)
+    TEXT[!MAY]: Before HPKE encryption, implementations **MAY** add an optional `padding` field to the signed message JSON.
+    TEXT[!MUST]: **MUST** contain random bytes encoded as unpadded base64url
+    TEXT[!MUST]: **MUST NOT** be covered by the Protocol Message signature (it is added after signing)
+    TEXT[!SHOULD]: **SHOULD** be used to pad the total plaintext length to a multiple of 1024 bytes (1 KiB)
+    TEXT[!MUST]: **MUST NOT** cause the total plaintext to exceed 16 MiB (16,777,216 bytes)
+    TEXT[!MUST]: Public Key Directories **MUST** ignore the `padding` field when validating signatures and processing messages.
     TEXT[!MUST]: When encrypting, the AAD parameter of the HPKE encryption **MUST** be set to the Server Encapsulation Key Identifier.
 
   SECTION: [Protocol Message Decryption](#protocol-message-decryption)
     TEXT[!MUST]: The result of a successful decryption **MUST** be a string that corresponds to a JSON-encoded Protocol Message.
-    TEXT[!MAY]: This
-    TEXT[!MAY]: JSON blob **MAY** have additional whitespace appended to it.
+    TEXT[!MUST]: If the decrypted JSON contains a `padding` field, it **MUST** be ignored.
 
   SECTION: [HPKE Configuration](#hpke-configuration)
     TEXT[!MUST]: The `info` parameter **MUST** always be set to the UTF-8 string, `fedi-e2ee/public-key-directory:v1:protocol-message`.

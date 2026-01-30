@@ -1,4 +1,4 @@
-(*= traceability/specifications/public-key-directory-specification/Specification.md#message-attribute-encryption-algorithm *)
+(*= https://raw.githubusercontent.com/fedi-e2ee/public-key-directory-specification/refs/heads/main/Specification.md#message-attribute-encryption-algorithm *)
 (*# Encrypt the plaintext attribute using Stream, with the nonce set to n, to obtain the ciphertext, c. *)
 
 (* TYPE DECLARATIONS *)

@@ -1,7 +1,7 @@
-(*= traceability/specifications/public-key-directory-specification/Specification.md#revokekey *)
+(*= https://raw.githubusercontent.com/fedi-e2ee/public-key-directory-specification/refs/heads/main/Specification.md#revokekey *)
 (*# Attempting to issue a `RevokeKey` **MUST** fail unless there is another public key associated with this Actor. *)
 
-(*= traceability/specifications/public-key-directory-specification/Specification.md#revokekey *)
+(*= https://raw.githubusercontent.com/fedi-e2ee/public-key-directory-specification/refs/heads/main/Specification.md#revokekey *)
 (*# **Protocol Invariant**: Implementations **MUST** enforce that at least one valid (non-revoked) public key remains *)
 (*# after a `RevokeKey` operation. *)
 

@@ -1,4 +1,4 @@
-(*= traceability/specifications/public-key-directory-specification/Specification.md#protocol-signatures *)
+(*= https://raw.githubusercontent.com/fedi-e2ee/public-key-directory-specification/refs/heads/main/Specification.md#protocol-signatures *)
 (*# Protocol Signature Construction: Signatures are computed over Pre-Authentication Encoding *)
 
 (* TYPE DECLARATIONS *)
