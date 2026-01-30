@@ -1,0 +1,242 @@
+(*= traceability/specifications/public-key-directory-specification/Specification.md#addauxdata *)
+(*# AddAuxData messages append extension-specific data to an actor's record. *)
+
+(*= traceability/specifications/public-key-directory-specification/Specification.md#revokeauxdata *)
+(*# RevokeAuxData revokes a single auxiliary data record. *)
+
+(* TYPE DECLARATIONS *)
+
+type actor_id.                 (* Actor identifier *)
+type public_key.               (* Ed25519 public key *)
+type secret_key.               (* Ed25519 secret key *)
+type signature.                (* Ed25519 signature *)
+type aux_type.                 (* Auxiliary data extension type *)
+type aux_data.                 (* Auxiliary data content *)
+type aux_id.                   (* Deterministic auxiliary data identifier *)
+type timestamp.                (* Unix timestamp *)
+type message.                  (* Protocol messages *)
+
+(* CHANNELS *)
+
+free c: channel.               (* Public network channel *)
+free pkd_internal: channel [private].  (* Internal PKD state *)
+
+(* CRYPTOGRAPHIC FUNCTIONS *)
+
+(* --- Ed25519 Signatures --- *)
+fun pk(secret_key): public_key.
+fun sign(message, secret_key): signature.
+reduc forall m: message, sk: secret_key;
+  verify(m, sign(m, sk), pk(sk)) = true.
+
+(* --- Message Construction --- *)
+fun AddAuxDataMsg(actor_id, aux_type, aux_data, timestamp): message.
+fun RevokeAuxDataMsg(actor_id, aux_type, aux_id): message.
+
+(* --- Deterministic Aux-ID Computation --- *)
+(* aux_id = HMAC-SHA512(aux_type || aux_data) - modeled as injective function *)
+fun compute_aux_id(aux_type, aux_data): aux_id [data].
+
+(* TABLES FOR STATE TRACKING *)
+
+table registered_keys(actor_id, public_key).
+table revoked_keys(actor_id, public_key).
+table auxiliary_data(actor_id, aux_type, aux_id, aux_data).
+table revoked_aux_data(actor_id, aux_id).
+
+(* EVENTS FOR SECURITY PROPERTIES *)
+
+event AuxDataAdded(actor_id, aux_type, aux_id, aux_data).
+event AuxDataRevoked(actor_id, aux_type, aux_id).
+event AuxDataSignatureVerified(actor_id, public_key).
+event ActorEnrolled(actor_id).
+event DuplicateAuxIdRejected(actor_id, aux_id).
+event UnauthorizedAuxDataAttempt(actor_id).
+event AuxIdBindingVerified(aux_type, aux_data, aux_id).
+
+(* SECURITY QUERIES *)
+
+(* --- Query 1: AddAuxData Requires Actor Enrollment ---
+   Auxiliary data can only be added for enrolled actors *)
+query actor: actor_id, atype: aux_type, aid: aux_id, adata: aux_data;
+  event(AuxDataAdded(actor, atype, aid, adata)) ==>
+    event(ActorEnrolled(actor)).
+
+(* --- Query 2: AddAuxData Requires Signature Verification ---
+   Adding auxiliary data must be authorized by valid signature *)
+query actor: actor_id, atype: aux_type, aid: aux_id, adata: aux_data, auth_pk: public_key;
+  event(AuxDataAdded(actor, atype, aid, adata)) ==>
+    event(AuxDataSignatureVerified(actor, auth_pk)).
+
+(* --- Query 3: Aux-ID Deterministically Binds to Data ---
+   The aux_id uniquely identifies the aux_type and aux_data *)
+query actor: actor_id, atype: aux_type, adata: aux_data, aid: aux_id;
+  event(AuxDataAdded(actor, atype, aid, adata)) ==>
+    event(AuxIdBindingVerified(atype, adata, aid)).
+
+(* --- Query 4: RevokeAuxData Requires Signature ---
+   Revoking auxiliary data must be authorized *)
+query actor: actor_id, atype: aux_type, aid: aux_id, auth_pk: public_key;
+  event(AuxDataRevoked(actor, atype, aid)) ==>
+    event(AuxDataSignatureVerified(actor, auth_pk)).
+
+(* --- Query 5: Duplicate Aux-ID Detection ---
+   When duplicate aux_id is attempted, it should be rejected *)
+query actor: actor_id, aid: aux_id;
+  event(DuplicateAuxIdRejected(actor, aid)) ==> true.
+
+(* --- Query 6: Secrecy of Auxiliary Data Key Material ---
+   IKM (encryption keys) remain secret *)
+free secret_ikm: aux_data [private].
+query attacker(secret_ikm).
+
+(* PKD ADDAUXDATA PROCESSING *)
+
+let PKD_ProcessAddAuxData =
+  in(c, (actor: actor_id, atype: aux_type, adata: aux_data,
+         ts: timestamp, auth_pk: public_key, sig: signature));
+
+  let msg = AddAuxDataMsg(actor, atype, adata, ts) in
+
+  (* REQUIREMENT 1: Actor must be enrolled (have at least one key) *)
+  get registered_keys(=actor, some_pk) in
+  event ActorEnrolled(actor);
+
+  (* REQUIREMENT 2: Authorizing key must be registered and not revoked *)
+  get registered_keys(=actor, =auth_pk) in
+  get revoked_keys(=actor, =auth_pk) in
+    event UnauthorizedAuxDataAttempt(actor)
+  else
+    (* REQUIREMENT 3: Verify signature *)
+    if verify(msg, sig, auth_pk) = true then
+    event AuxDataSignatureVerified(actor, auth_pk);
+
+    (* REQUIREMENT 4: Compute deterministic aux_id *)
+    let aid = compute_aux_id(atype, adata) in
+    event AuxIdBindingVerified(atype, adata, aid);
+
+    (* REQUIREMENT 5: Check for duplicate aux_id *)
+    get auxiliary_data(=actor, =atype, =aid, existing_data) in
+      event DuplicateAuxIdRejected(actor, aid)
+    else
+      (* Store auxiliary data *)
+      insert auxiliary_data(actor, atype, aid, adata);
+      event AuxDataAdded(actor, atype, aid, adata);
+      out(c, (actor, atype, aid))
+  else
+    event UnauthorizedAuxDataAttempt(actor).
+
+(* PKD REVOKEAUXDATA PROCESSING *)
+
+let PKD_ProcessRevokeAuxData =
+  in(c, (actor: actor_id, atype: aux_type, aid: aux_id,
+         auth_pk: public_key, sig: signature));
+
+  let msg = RevokeAuxDataMsg(actor, atype, aid) in
+
+  (* REQUIREMENT 1: Actor must be enrolled *)
+  get registered_keys(=actor, some_pk) in
+
+  (* REQUIREMENT 2: Authorizing key must be registered and not revoked *)
+  get registered_keys(=actor, =auth_pk) in
+  get revoked_keys(=actor, =auth_pk) in
+    0  (* Key is revoked - silent reject *)
+  else
+    (* REQUIREMENT 3: Verify signature *)
+    if verify(msg, sig, auth_pk) = true then
+    event AuxDataSignatureVerified(actor, auth_pk);
+
+    (* REQUIREMENT 4: Verify auxiliary data exists *)
+    get auxiliary_data(=actor, =atype, =aid, adata) in
+      (* REQUIREMENT 5: Check not already revoked *)
+      get revoked_aux_data(=actor, =aid) in
+        0  (* Already revoked *)
+      else
+        insert revoked_aux_data(actor, aid);
+        event AuxDataRevoked(actor, atype, aid);
+        out(c, (actor, atype, aid))
+    else
+      0.  (* Auxiliary data not found *)
+
+(* HONEST ACTOR PROCESSES *)
+
+(* Actor adds auxiliary data *)
+let HonestActorAddAuxData(actor: actor_id, sk: secret_key,
+                          atype: aux_type, adata: aux_data) =
+  let actor_pk = pk(sk) in
+  new ts: timestamp;
+
+  (* Sign the message *)
+  let msg = AddAuxDataMsg(actor, atype, adata, ts) in
+  let sig = sign(msg, sk) in
+
+  out(c, (actor, atype, adata, ts, actor_pk, sig)).
+
+(* Actor revokes auxiliary data *)
+let HonestActorRevokeAuxData(actor: actor_id, sk: secret_key,
+                              atype: aux_type, aid: aux_id) =
+  let actor_pk = pk(sk) in
+
+  let msg = RevokeAuxDataMsg(actor, atype, aid) in
+  let sig = sign(msg, sk) in
+
+  out(c, (actor, atype, aid, actor_pk, sig)).
+
+(* ATTACKER SCENARIOS *)
+
+(* Attacker tries to add aux data for honest actor *)
+let AttackerAddAuxData(target_actor: actor_id, attacker_sk: secret_key,
+                        atype: aux_type, adata: aux_data) =
+  let attacker_pk = pk(attacker_sk) in
+  new ts: timestamp;
+
+  let msg = AddAuxDataMsg(target_actor, atype, adata, ts) in
+  let sig = sign(msg, attacker_sk) in
+
+  out(c, (target_actor, atype, adata, ts, attacker_pk, sig)).
+
+(* MAIN PROCESS *)
+
+process
+  (* Generate honest actor *)
+  new honest_actor: actor_id;
+  new honest_sk: secret_key;
+  let honest_pk = pk(honest_sk) in
+
+  (* Generate auxiliary data types *)
+  new age_key_type: aux_type;
+  new ssh_key_type: aux_type;
+
+  (* Generate honest auxiliary data (not secret_ikm) *)
+  new honest_aux_data: aux_data;
+
+  (* Register honest actor's key *)
+  insert registered_keys(honest_actor, honest_pk);
+
+  (* Generate attacker *)
+  new attacker_sk: secret_key;
+  let attacker_pk = pk(attacker_sk) in
+  out(c, attacker_sk);
+  out(c, attacker_pk);
+
+  (* Public information *)
+  out(c, honest_actor);
+  out(c, honest_pk);
+  out(c, age_key_type);
+  out(c, ssh_key_type);
+
+  (* Attacker can create their own aux data *)
+  new attacker_aux_data: aux_data;
+  out(c, attacker_aux_data);
+
+  (
+    (* PKD processes *)
+    !PKD_ProcessAddAuxData |
+    !PKD_ProcessRevokeAuxData |
+
+    (* Honest actor operations *)
+    HonestActorAddAuxData(honest_actor, honest_sk, age_key_type, honest_aux_data) |
+
+    (* Attacker scenarios - trying to add for honest actor *)
+    !AttackerAddAuxData(honest_actor, attacker_sk, age_key_type, attacker_aux_data)
+  )
