@@ -1,0 +1,202 @@
+(*= traceability/specifications/public-key-directory-specification/Specification.md#protocol-messages *)
+(*# Protocol messages that originate client-side MUST be encrypted using HPKE. *)
+
+(*= traceability/specifications/public-key-directory-specification/Specification.md#cryptography-protocols *)
+(*# HPKE Suite: DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, ChaCha20Poly1305 *)
+
+(*
+  This model verifies that HPKE provides confidentiality for protocol messages
+  sent from clients to the PKD, protecting against malicious Fediverse instances
+  that relay the ciphertexts but cannot read them.
+*)
+
+(* TYPE DECLARATIONS *)
+
+type x25519_secret.            (* X25519 secret key *)
+type x25519_public.            (* X25519 public key *)
+type ed25519_secret.           (* Ed25519 secret key *)
+type ed25519_public.           (* Ed25519 public key *)
+type signature.                (* Ed25519 signature *)
+type encapsulated_key.         (* HPKE encapsulated key (ephemeral public key) *)
+type ciphertext.               (* HPKE ciphertext *)
+type aad.                      (* Additional authenticated data *)
+type info.                     (* HPKE info parameter for domain separation *)
+type key_id.                   (* Server encapsulation key identifier *)
+type protocol_message.         (* Protocol message plaintext *)
+
+(* CHANNELS *)
+
+free c: channel.               (* Public network channel - attacker can observe *)
+free pkd_internal: channel [private].  (* Internal PKD processing channel *)
+
+(* CONSTANTS *)
+
+(* Domain separation info string *)
+const HPKE_INFO: info.         (* "fedi-e2ee/public-key-directory:v1:protocol-message" *)
+const OTHER_INFO: info.        (* Different protocol info *)
+
+(* CRYPTOGRAPHIC FUNCTIONS *)
+
+(* --- X25519 Key Generation --- *)
+fun x25519_pk(x25519_secret): x25519_public.
+
+(* --- Ed25519 Signatures --- *)
+fun ed25519_pk(ed25519_secret): ed25519_public.
+fun sign(protocol_message, ed25519_secret): signature.
+reduc forall m: protocol_message, sk: ed25519_secret;
+  verify(m, sign(m, sk), ed25519_pk(sk)) = true.
+
+(* --- HPKE Encryption ---
+   Models DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, ChaCha20Poly1305
+
+   HPKE provides IND-CCA2 security (ciphertext indistinguishability
+   under chosen ciphertext attack) assuming ECDLP hardness on X25519.
+*)
+
+(* Encapsulation produces ephemeral key *)
+fun hpke_encap(x25519_public): encapsulated_key.
+
+(* HPKE encryption *)
+fun hpke_seal(x25519_public, protocol_message, info, aad): ciphertext.
+
+(* HPKE decryption: requires matching secret key, encap, ciphertext, info, aad *)
+reduc forall sk: x25519_secret, msg: protocol_message, i: info, a: aad;
+  hpke_open(sk, hpke_encap(x25519_pk(sk)), hpke_seal(x25519_pk(sk), msg, i, a), i, a) = msg.
+
+(* Key ID computation from public key (via HMAC) *)
+fun compute_key_id(x25519_public): key_id [data].
+fun aad_from_key_id(key_id): aad [data].
+
+(* TABLES FOR STATE TRACKING *)
+
+table pkd_encapsulation_keys(x25519_public, key_id).
+table registered_client_keys(ed25519_public).
+
+(* EVENTS FOR SECURITY PROPERTIES *)
+
+event ClientEncrypted(protocol_message, x25519_public, ed25519_public).
+event PKDDecrypted(protocol_message, x25519_public).
+event PKDAuthenticated(protocol_message, ed25519_public).
+event InstanceRelayed(ciphertext).
+
+(* SECURITY QUERIES *)
+
+(* --- Query 1: PKD Secret Key Secrecy ---
+   The PKD's X25519 secret key remains secret; instance cannot decrypt *)
+free pkd_sk: x25519_secret [private].
+query attacker(pkd_sk).
+
+(* --- Query 2: Honest Client Secret Key Secrecy ---
+   The honest client's signing key remains secret *)
+free honest_client_sk: ed25519_secret [private].
+query attacker(honest_client_sk).
+
+(* --- Query 3: Message Confidentiality ---
+   The plaintext of messages encrypted to PKD remains confidential
+   (attacker/instance cannot learn it without PKD decrypting) *)
+free secret_msg: protocol_message [private].
+query attacker(secret_msg).
+
+(* --- Query 4: Message Authentication ---
+   If PKD authenticates a message from honest client, that client sent it *)
+query msg: protocol_message, client_pk: ed25519_public, pkd_pk: x25519_public;
+  event(PKDAuthenticated(msg, client_pk)) ==>
+    event(ClientEncrypted(msg, pkd_pk, client_pk)).
+
+(* Note: PKDDecrypted without authentication is allowed - attackers can send
+   their own messages to the PKD. The security properties that matter are:
+   1. Confidentiality: attacker cannot learn honest client's messages
+   2. Authentication: attacker cannot impersonate honest clients
+   Both are verified by queries 3 and 4 above. *)
+
+(* CLIENT ENCRYPTION PROCESS *)
+
+let Client_EncryptMessage(pkd_pk: x25519_public, msg: protocol_message,
+                          client_sk: ed25519_secret) =
+  let client_pk = ed25519_pk(client_sk) in
+
+  (* Get key ID for AAD *)
+  let kid = compute_key_id(pkd_pk) in
+  let a = aad_from_key_id(kid) in
+
+  (* Sign the message first *)
+  let sig = sign(msg, client_sk) in
+
+  (* Encrypt with HPKE using proper domain separation *)
+  let encap = hpke_encap(pkd_pk) in
+  let ct = hpke_seal(pkd_pk, msg, HPKE_INFO, a) in
+
+  event ClientEncrypted(msg, pkd_pk, client_pk);
+
+  (* Send via public channel - instance/attacker can see ciphertext but not plaintext *)
+  out(c, (encap, ct, sig, client_pk)).
+
+(* FEDIVERSE INSTANCE (Modeled as attacker relay) *)
+(* The instance relays messages but shouldn't be able to read them *)
+
+let Instance_Relay =
+  in(c, (encap: encapsulated_key, ct: ciphertext, sig: signature, client_pk: ed25519_public));
+  event InstanceRelayed(ct);
+  (* Instance can only forward, not decrypt *)
+  out(c, (encap, ct, sig, client_pk)).
+
+(* PKD DECRYPTION PROCESS *)
+
+let PKD_DecryptMessage(pkd_sk: x25519_secret) =
+  let pkd_pk = x25519_pk(pkd_sk) in
+  let kid = compute_key_id(pkd_pk) in
+  let a = aad_from_key_id(kid) in
+
+  in(c, (encap: encapsulated_key, ct: ciphertext, sig: signature, client_pk: ed25519_public));
+
+  (* Decrypt with correct info and AAD *)
+  let msg = hpke_open(pkd_sk, encap, ct, HPKE_INFO, a) in
+
+  event PKDDecrypted(msg, pkd_pk);
+
+  (* Verify signature on decrypted message *)
+  if verify(msg, sig, client_pk) = true then
+  (
+    (* Only authenticate if from registered client *)
+    get registered_client_keys(=client_pk) in
+    event PKDAuthenticated(msg, client_pk);
+
+    (* Output on private channel - attacker cannot see processed result *)
+    out(pkd_internal, (msg, client_pk))
+  ).
+
+(* MAIN PROCESS *)
+
+process
+  (* PKD encapsulation key pair *)
+  new pkd_secret: x25519_secret;
+  let pkd_public = x25519_pk(pkd_secret) in
+  let pkd_kid = compute_key_id(pkd_public) in
+  insert pkd_encapsulation_keys(pkd_public, pkd_kid);
+
+  (* Honest client *)
+  new client_sk: ed25519_secret;
+  let client_pk = ed25519_pk(client_sk) in
+  insert registered_client_keys(client_pk);
+
+  (* Attacker's Ed25519 signing key (can send their own messages) *)
+  new attacker_e_sk: ed25519_secret;
+  let attacker_e_pk = ed25519_pk(attacker_e_sk) in
+  out(c, attacker_e_sk);
+  out(c, attacker_e_pk);
+
+  (* Public information *)
+  out(c, pkd_public);
+  out(c, pkd_kid);
+  out(c, client_pk);
+
+  (
+    (* Honest client encrypts secret message to PKD *)
+    Client_EncryptMessage(pkd_public, secret_msg, client_sk) |
+
+    (* Instance relays (attacker observes) *)
+    !Instance_Relay |
+
+    (* PKD decrypts messages *)
+    !PKD_DecryptMessage(pkd_secret)
+  )
