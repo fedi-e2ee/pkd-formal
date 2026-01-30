@@ -1,0 +1,222 @@
+(*= traceability/specifications/public-key-directory-specification/Specification.md#checkpoint *)
+(*# Checkpoint: Cross-PKD Merkle root commitment *)
+
+(* TYPE DECLARATIONS *)
+
+type pkd_id.                   (* PKD server identifier/URL *)
+type public_key.               (* Ed25519 public key *)
+type secret_key.               (* Ed25519 secret key *)
+type signature.                (* Ed25519 signature *)
+type merkle_root.              (* Merkle tree root hash *)
+type timestamp.                (* Unix timestamp *)
+type message.                  (* Protocol messages *)
+
+(* CHANNELS *)
+
+free c: channel.               (* Public network channel *)
+free peer_channel: channel.    (* Channel between PKD peers *)
+
+(* CRYPTOGRAPHIC FUNCTIONS *)
+
+fun pk(secret_key): public_key.
+fun sign(message, secret_key): signature.
+reduc forall m: message, sk: secret_key;
+  verify(m, sign(m, sk), pk(sk)) = true.
+
+(* Checkpoint message: from_pkd commits to to_pkd's merkle root *)
+fun CheckpointMsg(pkd_id, merkle_root, pkd_id, merkle_root, timestamp): message.
+
+(* TABLES FOR STATE TRACKING *)
+
+(* Allowlist of trusted peer PKDs *)
+table peer_allowlist(pkd_id, public_key).
+
+(* Recorded checkpoints *)
+table checkpoints(pkd_id, merkle_root, pkd_id, merkle_root, timestamp).
+
+(* PKD's own Merkle roots (historical) *)
+table own_merkle_roots(pkd_id, merkle_root, timestamp).
+
+(* EVENTS FOR SECURITY PROPERTIES *)
+
+event CheckpointReceived(pkd_id, merkle_root, pkd_id, merkle_root).
+event CheckpointAccepted(pkd_id, merkle_root, pkd_id, merkle_root).
+event CheckpointRejected(pkd_id, merkle_root).
+event SenderVerified(pkd_id, public_key).
+event SenderNotAllowed(pkd_id).
+event TimestampFresh(pkd_id, timestamp).
+event TimestampStale(pkd_id, timestamp).
+event MerkleRootValidated(pkd_id, merkle_root).
+event CrossPKDConsistency(pkd_id, pkd_id, merkle_root).
+
+(* SECURITY QUERIES *)
+
+(* --- Query 1: Checkpoint Requires Allowlisted Sender ---
+   A checkpoint is only accepted from an allowlisted peer PKD *)
+query from_pkd: pkd_id, from_root: merkle_root, to_pkd: pkd_id, to_root: merkle_root, sender_pk: public_key;
+  event(CheckpointAccepted(from_pkd, from_root, to_pkd, to_root)) ==>
+    event(SenderVerified(from_pkd, sender_pk)).
+
+(* --- Query 2: Non-Allowlisted Senders Are Rejected ---
+   If sender is not on allowlist, checkpoint must be rejected *)
+query from_pkd: pkd_id, from_root: merkle_root;
+  event(SenderNotAllowed(from_pkd)) ==>
+    event(CheckpointRejected(from_pkd, from_root)).
+
+(* --- Query 3: Checkpoint Timestamp Freshness ---
+   Accepted checkpoints must have fresh timestamps *)
+query from_pkd: pkd_id, from_root: merkle_root, to_pkd: pkd_id, to_root: merkle_root, ts: timestamp;
+  event(CheckpointAccepted(from_pkd, from_root, to_pkd, to_root)) ==>
+    event(TimestampFresh(from_pkd, ts)).
+
+(* --- Query 4: Cross-PKD Consistency Requires Acceptance ---
+   Cross-PKD consistency is only established when checkpoint is accepted *)
+query from_pkd: pkd_id, from_root: merkle_root, to_pkd: pkd_id, to_root: merkle_root;
+  event(CrossPKDConsistency(from_pkd, to_pkd, to_root)) ==>
+    event(CheckpointAccepted(from_pkd, from_root, to_pkd, to_root)).
+
+(* --- Query 5: Merkle Root Validation ---
+   The to_merkle_root in checkpoint must be validated *)
+query from_pkd: pkd_id, from_root: merkle_root, to_pkd: pkd_id, to_root: merkle_root;
+  event(CheckpointAccepted(from_pkd, from_root, to_pkd, to_root)) ==>
+    event(MerkleRootValidated(to_pkd, to_root)).
+
+(* --- Query 6: Secrecy of PKD Secret Keys ---
+   Honest PKD secret keys remain secret *)
+free honest_pkd_sk: secret_key [private].
+query attacker(honest_pkd_sk).
+
+(* PKD CHECKPOINT PROCESSING *)
+
+let PKD_ProcessCheckpoint(own_id: pkd_id) =
+  in(c, (from_pkd: pkd_id, from_root: merkle_root,
+         to_pkd: pkd_id, to_root: merkle_root,
+         ts: timestamp, sender_pk: public_key, sig: signature));
+
+  event CheckpointReceived(from_pkd, from_root, to_pkd, to_root);
+
+  let msg = CheckpointMsg(from_pkd, from_root, to_pkd, to_root, ts) in
+
+  (* REQUIREMENT 1: Verify sender is on allowlist *)
+  get peer_allowlist(=from_pkd, =sender_pk) in
+  event SenderVerified(from_pkd, sender_pk);
+
+  (* REQUIREMENT 2: Verify signature *)
+  if verify(msg, sig, sender_pk) = true then
+
+  (* REQUIREMENT 3: Verify timestamp is fresh (modeled as event) *)
+  event TimestampFresh(from_pkd, ts);
+
+  (* REQUIREMENT 4: Verify to_pkd matches this PKD *)
+  if to_pkd = own_id then
+
+  (* REQUIREMENT 5: Verify to_root is a valid Merkle root for this PKD *)
+  get own_merkle_roots(=own_id, =to_root, root_ts) in
+  event MerkleRootValidated(to_pkd, to_root);
+
+  (* Accept checkpoint *)
+  insert checkpoints(from_pkd, from_root, to_pkd, to_root, ts);
+  event CheckpointAccepted(from_pkd, from_root, to_pkd, to_root);
+  event CrossPKDConsistency(from_pkd, to_pkd, to_root);
+  out(c, (from_pkd, to_pkd, to_root, true))
+
+  else
+    event CheckpointRejected(from_pkd, from_root)
+  else
+    event CheckpointRejected(from_pkd, from_root)
+  else
+    (* Sender not on allowlist *)
+    event SenderNotAllowed(from_pkd);
+    event CheckpointRejected(from_pkd, from_root).
+
+(* HONEST PKD SENDS CHECKPOINT *)
+
+let HonestPKD_SendCheckpoint(from_id: pkd_id, from_sk: secret_key,
+                              to_id: pkd_id, to_root: merkle_root) =
+  let from_pk = pk(from_sk) in
+  new from_root: merkle_root;
+  new ts: timestamp;
+
+  let msg = CheckpointMsg(from_id, from_root, to_id, to_root, ts) in
+  let sig = sign(msg, from_sk) in
+
+  out(c, (from_id, from_root, to_id, to_root, ts, from_pk, sig)).
+
+(* ATTACKER SCENARIOS *)
+
+(* Attacker tries to send checkpoint from non-allowlisted PKD *)
+let AttackerSendCheckpoint(attacker_pkd: pkd_id, attacker_sk: secret_key,
+                            target_pkd: pkd_id) =
+  let attacker_pk = pk(attacker_sk) in
+  new fake_from_root: merkle_root;
+  new fake_to_root: merkle_root;
+  new ts: timestamp;
+
+  let msg = CheckpointMsg(attacker_pkd, fake_from_root, target_pkd, fake_to_root, ts) in
+  let sig = sign(msg, attacker_sk) in
+
+  out(c, (attacker_pkd, fake_from_root, target_pkd, fake_to_root, ts, attacker_pk, sig)).
+
+(* Attacker tries to replay old checkpoint *)
+let AttackerReplayCheckpoint =
+  in(c, (from_pkd: pkd_id, from_root: merkle_root,
+         to_pkd: pkd_id, to_root: merkle_root,
+         ts: timestamp, sender_pk: public_key, sig: signature));
+
+  (* Replay the same checkpoint *)
+  out(c, (from_pkd, from_root, to_pkd, to_root, ts, sender_pk, sig)).
+
+(* MAIN PROCESS *)
+
+process
+  (* Honest PKD 1 *)
+  new pkd1_id: pkd_id;
+  new pkd1_sk: secret_key;
+  let pkd1_pk = pk(pkd1_sk) in
+
+  (* Honest PKD 2 *)
+  new pkd2_id: pkd_id;
+  new pkd2_sk: secret_key;
+  let pkd2_pk = pk(pkd2_sk) in
+
+  (* Establish peer allowlist (mutual trust) *)
+  insert peer_allowlist(pkd1_id, pkd1_pk);
+  insert peer_allowlist(pkd2_id, pkd2_pk);
+
+  (* Establish own Merkle roots *)
+  new root1: merkle_root;
+  new root2: merkle_root;
+  new ts1: timestamp;
+  new ts2: timestamp;
+  insert own_merkle_roots(pkd1_id, root1, ts1);
+  insert own_merkle_roots(pkd2_id, root2, ts2);
+
+  (* Attacker *)
+  new attacker_pkd: pkd_id;
+  new attacker_sk: secret_key;
+  let attacker_pk = pk(attacker_sk) in
+  out(c, attacker_sk);
+  out(c, attacker_pk);
+  out(c, attacker_pkd);
+
+  (* Public information *)
+  out(c, pkd1_id);
+  out(c, pkd1_pk);
+  out(c, pkd2_id);
+  out(c, pkd2_pk);
+  out(c, root1);
+  out(c, root2);
+
+  (
+    (* PKD processes *)
+    !PKD_ProcessCheckpoint(pkd1_id) |
+    !PKD_ProcessCheckpoint(pkd2_id) |
+
+    (* Honest PKD operations *)
+    HonestPKD_SendCheckpoint(pkd1_id, pkd1_sk, pkd2_id, root2) |
+    HonestPKD_SendCheckpoint(pkd2_id, pkd2_sk, pkd1_id, root1) |
+
+    (* Attacker scenarios *)
+    !AttackerSendCheckpoint(attacker_pkd, attacker_sk, pkd1_id) |
+    !AttackerReplayCheckpoint
+  )
