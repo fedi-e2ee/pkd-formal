@@ -26,18 +26,38 @@ SPECIFICATION: [Public Key Directory Specification](https://raw.githubuserconten
     TEXT[!SHOULD]: processed by the system in a very recent period of time.
     TEXT[!MUST]: This **MUST** be distinct from an error condition.
 
+  SECTION: [Merkle Root Encoding](#merkle-root-encoding)
+    TEXT[implementation]: prefixed with a distinct prefix for the current protocol version followed by a colon
+
   SECTION: [Protocol Signatures](#protocol-signatures)
-    TEXT[!MUST]:    Object keys **MUST** be sorted in ASCII byte order, and there **MUST** be no duplicate keys.
+    TEXT[implementation]: Every [Protocol Message](#protocol-messages) will contain a digital signature.
+    TEXT[implementation]: Each digital signature will be calculated over the following information
+    TEXT[!MUST,implementation]:    Object keys **MUST** be sorted in ASCII byte order, and there **MUST** be no duplicate keys.
+    TEXT[implementation]: To ensure domain separation, we will use [Pre-Authentication Encoding
+
+  SECTION: [PreAuthEncode](#preauthencode)
+    TEXT[implementation]: In order to canonicalize multi-part inputs to a hash function or signature algorithm, we will use the strategy from
+    TEXT[implementation]: LE64() function that accepts an unsigned 64-bit integer and returns an
+    TEXT[implementation]: octet sequence in little endian byte order
+    TEXT[implementation]: Append the LE64() of the number of pieces being encoded.
+    TEXT[implementation]: Append the LE64() of the number of octets in this piece.
 
   SECTION: [Key Identifiers](#key-identifiers)
     TEXT[!SHOULD]: Every message except revocations and the first `AddKey` for an Actor **SHOULD** include a `key-id` value.
     TEXT[!MUST]: The `key-id` attribute **MUST NOT** be an encoded representation of the public key.
 
   SECTION: [Revocation Tokens](#revocation-tokens)
+    TEXT[implementation]: A revocation token is a compact token that a user can issue at any time to revoke an existing public key.
+    TEXT[implementation]: tmp := version || REVOCATION_CONSTANT || public_key
+    TEXT[implementation]: revocation_token := base64url_encode(tmp || Sign(secret_key, tmp))
+    TEXT[implementation]: `REVOCATION_CONSTANT` is a domain-separated constant for revoking an existing key.
     TEXT[!MAY]: These values **MAY** be encrypted and stored in case of emergency.
 
   SECTION: [Requirements for Auxiliary Data Extensions](#requirements-for-auxiliary-data-extensions)
     TEXT[!SHOULD]: Being very strict about the format of the data accepted by a given extension is highly **RECOMMENDED**.
+
+  SECTION: [Message Attribute Shreddability](#message-attribute-shreddability)
+    TEXT[implementation]: using a committing authenticated encryption mode.
 
   SECTION: [Timestamps](#timestamps)
     TEXT[!MUST]: Implementations **MUST NOT** truncate UNIX timestamps to 32 bits.
@@ -102,14 +122,18 @@ SPECIFICATION: [Public Key Directory Specification](https://raw.githubuserconten
     TEXT[!MUST]: Message Signature if the client is properly authenticated.
 
   SECTION: [AddKey](#addkey)
-    TEXT[!MUST]: The first `AddKey` for any given Actor **MUST** be self-signed by the same public key being added.
+    TEXT[implementation]: An `AddKey` message associated with an Actor is intended to associate a new Public Key to this actor.
+    TEXT[!MUST,implementation]: The first `AddKey` for any given Actor **MUST** be self-signed by the same public key being added.
+    TEXT[implementation]: Every subsequent
+    TEXT[implementation]: `AddKey` must be signed by an existing, non-revoked public key.
     TEXT[!SHOULD]: Every subsequent `AddKey` for a given Actor
     TEXT[!SHOULD]: **SHOULD** have a `key-id`.
     TEXT[!MUST]: All `AddKey` messages for a given actor must be sent from the actor's Fediverse Server, which **MUST** support HTTP
     TEXT[!MUST]: Signatures.
 
   SECTION: [RevokeKey](#revokekey)
-    TEXT[!MUST]: Attempting to issue a `RevokeKey` **MUST** fail unless there is another public key associated with this Actor.
+    TEXT[implementation]: A `RevokeKey` message marks an existing public key as untrusted.
+    TEXT[!MUST,implementation]: Attempting to issue a `RevokeKey` **MUST** fail unless there is another public key associated with this Actor.
     TEXT[!MUST]: > [!IMPORTANT]
     TEXT[!MUST]: > **Protocol Invariant**: Implementations **MUST** enforce that at least one valid (non-revoked) public key remains
     TEXT[!MUST]: > after a `RevokeKey` operation.
@@ -117,28 +141,47 @@ SPECIFICATION: [Public Key Directory Specification](https://raw.githubuserconten
     TEXT[!MUST]: > `RevokeKey` message that would leave an Actor with zero valid keys.
 
   SECTION: [MoveIdentity](#moveidentity)
-    TEXT[!MUST]: The message **MUST** be signed by a valid secret key for the `old-actor`, whereas the HTTP Signature **MUST** come from
+    TEXT[implementation]: This moves all the mappings from the old Actor ID to the new Actor ID.
+    TEXT[!MUST,implementation]: The message **MUST** be signed by a valid secret key for the `old-actor`
+    TEXT[!MUST]: , whereas the HTTP Signature **MUST** come from
     TEXT[!MUST]: the new Fediverse Server instance.
     TEXT[!MUST]: > Implementations **MUST** verify both signatures independently.
     TEXT[!MUST]: These signatures serve
     TEXT[!MUST]: > different purposes and **MUST NOT** be conflated or allow one to substitute for the other.
-    TEXT[!MUST]: This message **MUST** be rejected if there are existing public keys for the target `new-actor`.
+    TEXT[!MUST,implementation]: This message **MUST** be rejected if there are existing public keys for the target `new-actor`.
 
   SECTION: [Fireproof](#fireproof)
+    TEXT[implementation]: `Fireproof` opts out of this recovery
     TEXT[!MAY]: This message **MAY** be sent out-of-band to the Public Key Directory without the Fediverse server's involvement.
-    TEXT[!MUST]: If an Actor is already in Fireproof status, a
-    TEXT[!MUST]: > subsequent `Fireproof` message **MUST** be rejected.
+    TEXT[!MUST,implementation]: If an Actor is already in Fireproof status, a
+    TEXT[!MUST,implementation]: > subsequent `Fireproof` message **MUST** be rejected.
     TEXT[!MUST]: Implementations **MUST** track whether an Actor is currently in Fireproof status and reject
     TEXT[!MUST]: > duplicate `Fireproof` messages accordingly.
 
+  SECTION: [UndoFireproof](#undofireproof)
+    TEXT[implementation]: This reverts the Fireproof status for a given Actor, re-enabling account recovery by instance administrators.
+    TEXT[implementation]: If the user is not in `Fireproof` status, this message is rejected.
+
+  SECTION: [BurnDown](#burndown)
+    TEXT[implementation]: A `BurnDown` message acts as a soft delete for all public keys and auxiliary data for a given Actor
+    TEXT[implementation]: a `BurnDown` is issued by an operator account on the Fediverse instance that hosts the
+
   SECTION: [BurnDown Validation Steps](#burndown-validation-steps)
+    TEXT[implementation]: If this actor is [fireproof](#fireproof), abort.
+    TEXT[implementation]: If the instance has previously enrolled a TOTP secret to this Fediverse server
+    TEXT[implementation]: Validate the message signature for the given public key.
     TEXT[!MUST]: > [!IMPORTANT]
     TEXT[!MUST]: > **Atomicity Requirement**: When a `BurnDown` Protocol Message is accepted (i.e., the actor **MUST NOT** be Fireproof),
     TEXT[!MUST]: > implementations **MUST** atomically perform the following operations within one transaction:
     TEXT[!MUST]: > These operations **MUST** be performed as a single atomic transaction.
     TEXT[!SHOULD]: Note: Processing the message **SHOULD** also require a valid one-time password (OTP).
 
+  SECTION: [RevokeKeyThirdParty](#revokekeythirdparty)
+    TEXT[implementation]: This is a special message type in two ways:
+    TEXT[implementation]: Since you need the secret key to generate the revocation token for a given public key
+
   SECTION: [RevokeKeyThirdParty Validation Steps](#revokekeythirdparty-validation-steps)
+    TEXT[implementation]: Validate signature for  `version || REVOCATION_CONSTANT || public_key`, using `public_key`.
     TEXT[!SHOULD]:    (In practice, this **SHOULD** only be one, but if that's ever not the case, we revoke them all here.)
 
   SECTION: [Encryption of Protocol Messages](#encryption-of-protocol-messages)
@@ -336,6 +379,21 @@ SPECIFICATION: [Public Key Directory Specification](https://raw.githubuserconten
     TEXT[!MUST]: For the first message in a PKD, the "recent" Merkle root **MUST** be set to the encoding of a sequence of `0x00`
     TEXT[!MUST]: bytes equal in length to the hash function being used.
 
+  SECTION: [Message Attribute Plaintext Commitment Algorithm](#message-attribute-plaintext-commitment-algorithm)
+    TEXT[implementation]: Set `l` to `len(m) || m || len(a) || a || len(p) || p`.
+    TEXT[implementation]: Set `Q` to the output of [`PwKDF`](#version-1-functions)
+
+  SECTION: [Message Attribute Encryption Algorithm](#message-attribute-encryption-algorithm)
+    TEXT[implementation]: Generate 32 bytes of random data, `r`.
+    TEXT[implementation]: Derive an encryption key, `Ek`, and nonce, `n`, through [`KDF`](#version-1-functions)
+    TEXT[implementation]: Derive an authentication key, `Ak`, through [`KDF`](#version-1-functions)
+    TEXT[implementation]: Derive a commitment salt, `s`, as the [`Hash`](#version-1-functions)
+    TEXT[implementation]: Calculate [a commitment of the plaintext
+    TEXT[implementation]: Encrypt the plaintext attribute using [`Stream`](#version-1-functions), with the nonce set to `n`, to obtain the
+    TEXT[implementation]:    ciphertext, `c`.
+    TEXT[implementation]: Calculate the [`MAC`](#version-1-functions)
+    TEXT[implementation]: Return `h || r || Q || t || c`.
+
   SECTION: [Client-Side Behavior](#client-side-behavior)
     TEXT[!MUST]: BurnDown messages **MUST NOT** use HPKE
     TEXT[!MUST]: encryption (the Public Key Directory **MUST** reject a BurnDown if it was HPKE encrypted), but the Instance Client
@@ -410,6 +468,14 @@ SPECIFICATION: [Public Key Directory Specification](https://raw.githubuserconten
     TEXT[!SHOULD]: mechanism for moderators to use for account recovery (which will use the [BurnDown API](#post-apiburndown).
 
 SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9162.txt
+  SECTION: [Merkle Trees](#section-2.1)
+    TEXT[implementation]: it is a binary tree where each non-leaf node is a
+    TEXT[implementation]:    hash of its children.
+
+  SECTION: [Definition of the Merkle Tree](#section-2.1.1)
+    TEXT[implementation]:    MTH({d[0]}) = HASH(0x00 || d[0]).
+    TEXT[implementation]:    MTH(D_n) = HASH(0x01 || MTH(D[0:k]) || MTH(D[k:n])),
+
   SECTION: [Signatures](#section-2.2)
     TEXT[!MUST]:    When signing data structures, a log MUST use one of the signature
     TEXT[!MUST]:    algorithms from the IANA "Signature Algorithms" registry, described
