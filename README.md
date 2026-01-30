@@ -6,6 +6,9 @@ This repository contains ProVerif models of the [Public Key Directory specificat
 and uses [Duvet](https://github.com/awslabs/duvet) to ensure the specification requiremments are satisfied by 
 the known implementations. 
 
+To understand the motivation for this repository, please refer to:
+*[Software Assurance & That Warm and Fuzzy Feeling](https://soatok.blog/2026/01/15/software-assurance-that-warm-and-fuzzy-feeling/)*.
+
 ## Running Proofs
 
 ### Prerequisites
