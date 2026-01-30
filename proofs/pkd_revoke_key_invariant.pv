@@ -1,0 +1,196 @@
+(*= traceability/specifications/public-key-directory-specification/Specification.md#revokekey *)
+(*# Attempting to issue a `RevokeKey` **MUST** fail unless there is another public key associated with this Actor. *)
+
+(*= traceability/specifications/public-key-directory-specification/Specification.md#revokekey *)
+(*# **Protocol Invariant**: Implementations **MUST** enforce that at least one valid (non-revoked) public key remains *)
+(*# after a `RevokeKey` operation. *)
+
+(* TYPE DECLARATIONS *)
+
+type actor_id.                 (* Actor identifier *)
+type public_key.               (* Ed25519 public key *)
+type secret_key.               (* Ed25519 secret key *)
+type signature.                (* Ed25519 signature *)
+type message.                  (* Protocol messages *)
+
+(* CHANNELS *)
+
+free c: channel.               (* Public network channel *)
+
+(* CRYPTOGRAPHIC FUNCTIONS *)
+
+fun pk(secret_key): public_key.
+fun sign(message, secret_key): signature.
+reduc forall m: message, sk: secret_key;
+  verify(m, sign(m, sk), pk(sk)) = true.
+
+fun RevokeKeyMsg(actor_id, public_key): message.
+
+(* TABLES FOR STATE TRACKING *)
+
+(* Track registered keys with count *)
+table registered_keys(actor_id, public_key).
+table revoked_keys(actor_id, public_key).
+
+(* EVENTS FOR SECURITY PROPERTIES *)
+
+event KeyRevoked(actor_id, public_key).
+event RevocationAuthorized(actor_id, public_key, public_key). (* actor, revoked_key, auth_key *)
+event LastKeyRevocationAttempt(actor_id, public_key).
+event LastKeyRevocationBlocked(actor_id, public_key).
+event ActorHasMultipleKeys(actor_id).
+event ActorHasSingleKey(actor_id).
+event SelfRevocationAttempt(actor_id, public_key).
+event SelfRevocationBlocked(actor_id, public_key).
+
+(* SECURITY QUERIES *)
+
+(* --- Query 1: Last Key Revocation is Blocked ---
+   When last key revocation attempt is made and blocked, both events fire *)
+query actor: actor_id, revoke_pk: public_key;
+  event(LastKeyRevocationBlocked(actor, revoke_pk)) ==>
+    event(LastKeyRevocationAttempt(actor, revoke_pk)).
+
+(* --- Query 2: Self-Revocation is Blocked ---
+   When self-revocation attempt is made and blocked, both events fire *)
+query actor: actor_id, revoke_pk: public_key;
+  event(SelfRevocationBlocked(actor, revoke_pk)) ==>
+    event(SelfRevocationAttempt(actor, revoke_pk)).
+
+(* --- Query 3: Successful Revocation Implies Multiple Keys ---
+   If a key was successfully revoked, actor must have had multiple keys *)
+query actor: actor_id, revoke_pk: public_key;
+  event(KeyRevoked(actor, revoke_pk)) ==>
+    event(ActorHasMultipleKeys(actor)).
+
+(* --- Query 4: Revocation Authorization ---
+   Any revoked key must have been authorized by a different valid key *)
+query actor: actor_id, revoke_pk: public_key, auth_pk: public_key;
+  event(KeyRevoked(actor, revoke_pk)) ==>
+    event(RevocationAuthorized(actor, revoke_pk, auth_pk)).
+
+(* --- Query 5: Cannot Revoke with Revoked Key ---
+   A revoked key cannot authorize further revocations *)
+query actor: actor_id, revoke_pk: public_key, auth_pk: public_key;
+  event(KeyRevoked(actor, revoke_pk)) ==>
+    (auth_pk <> revoke_pk).
+
+(* PKD REVOKEKEY PROCESSING WITH INVARIANT ENFORCEMENT *)
+
+(* Process for actor with exactly one key - revocation blocked *)
+let PKD_ProcessRevokeKey_SingleKey(actor: actor_id, only_pk: public_key) =
+  in(c, (claimed_actor: actor_id, revoke_pk: public_key,
+         auth_pk: public_key, sig: signature));
+
+  if claimed_actor = actor then
+  if revoke_pk = only_pk then
+  (
+    event ActorHasSingleKey(actor);
+    event LastKeyRevocationAttempt(actor, revoke_pk);
+    event LastKeyRevocationBlocked(actor, revoke_pk);
+    out(c, (actor, revoke_pk, false))  (* Rejection signal *)
+  ).
+
+(* Process for actor with multiple keys - revocation allowed *)
+let PKD_ProcessRevokeKey_MultipleKeys(actor: actor_id, pk1: public_key, pk2: public_key) =
+  in(c, (claimed_actor: actor_id, revoke_pk: public_key,
+         auth_pk: public_key, sig: signature));
+
+  let msg = RevokeKeyMsg(claimed_actor, revoke_pk) in
+
+  if claimed_actor = actor then
+  event ActorHasMultipleKeys(actor);
+
+  (* Check: Cannot revoke with the same key being revoked *)
+  if auth_pk = revoke_pk then
+  (
+    event SelfRevocationAttempt(actor, revoke_pk);
+    event SelfRevocationBlocked(actor, revoke_pk)
+  )
+  else
+  (
+    (* Verify auth_pk is one of the registered keys *)
+    if (auth_pk = pk1) || (auth_pk = pk2) then
+
+    (* Verify signature *)
+    if verify(msg, sig, auth_pk) = true then
+    (
+      event RevocationAuthorized(actor, revoke_pk, auth_pk);
+      event KeyRevoked(actor, revoke_pk);
+      out(c, (actor, revoke_pk, true))  (* Success signal *)
+    )
+  ).
+
+(* HONEST ACTOR WITH SINGLE KEY *)
+
+let HonestActorSingleKey(actor: actor_id, sk: secret_key) =
+  let actor_pk = pk(sk) in
+  insert registered_keys(actor, actor_pk);
+
+  (* Try to revoke own only key (should fail) *)
+  let msg = RevokeKeyMsg(actor, actor_pk) in
+  let sig = sign(msg, sk) in
+  out(c, (actor, actor_pk, actor_pk, sig)).
+
+(* HONEST ACTOR WITH TWO KEYS *)
+
+let HonestActorTwoKeys(actor: actor_id, sk1: secret_key, sk2: secret_key) =
+  let pk1 = pk(sk1) in
+  let pk2 = pk(sk2) in
+  insert registered_keys(actor, pk1);
+  insert registered_keys(actor, pk2);
+
+  (* Revoke second key using first key (should succeed) *)
+  let msg = RevokeKeyMsg(actor, pk2) in
+  let sig = sign(msg, sk1) in
+  out(c, (actor, pk2, pk1, sig)).
+
+(* HONEST ACTOR ATTEMPTS SELF-REVOCATION *)
+
+let HonestActorSelfRevocation(actor: actor_id, sk1: secret_key, sk2: secret_key) =
+  let pk1 = pk(sk1) in
+  let pk2 = pk(sk2) in
+
+  (* Try to revoke key using itself (should fail even with multiple keys) *)
+  let msg = RevokeKeyMsg(actor, pk1) in
+  let sig = sign(msg, sk1) in  (* Signing with same key being revoked *)
+  out(c, (actor, pk1, pk1, sig)).
+
+(* MAIN PROCESS *)
+
+process
+  (* Actor with single key *)
+  new single_key_actor: actor_id;
+  new single_sk: secret_key;
+  let single_pk = pk(single_sk) in
+
+  (* Actor with multiple keys *)
+  new multi_key_actor: actor_id;
+  new multi_sk1: secret_key;
+  new multi_sk2: secret_key;
+  let multi_pk1 = pk(multi_sk1) in
+  let multi_pk2 = pk(multi_sk2) in
+
+  (* Attacker *)
+  new attacker_sk: secret_key;
+  let attacker_pk = pk(attacker_sk) in
+  out(c, attacker_sk);
+  out(c, attacker_pk);
+
+  (* Public information *)
+  out(c, single_key_actor);
+  out(c, single_pk);
+  out(c, multi_key_actor);
+  out(c, multi_pk1);
+  out(c, multi_pk2);
+
+  (
+    (* PKD processes *)
+    PKD_ProcessRevokeKey_SingleKey(single_key_actor, single_pk) |
+    PKD_ProcessRevokeKey_MultipleKeys(multi_key_actor, multi_pk1, multi_pk2) |
+
+    (* Honest actor scenarios *)
+    HonestActorSingleKey(single_key_actor, single_sk) |
+    HonestActorTwoKeys(multi_key_actor, multi_sk1, multi_sk2) |
+    HonestActorSelfRevocation(multi_key_actor, multi_sk1, multi_sk2)
+  )
