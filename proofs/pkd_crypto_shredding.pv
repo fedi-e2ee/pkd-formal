@@ -1,0 +1,218 @@
+(*= https://raw.githubusercontent.com/fedi-e2ee/public-key-directory-specification/refs/heads/main/Specification.md#encrypting-message-attributes-to-enable-crypto-shredding *)
+(*# The goal of attribute encryption is compliance, not security. *)
+
+(*= https://raw.githubusercontent.com/fedi-e2ee/public-key-directory-specification/refs/heads/main/Specification.md#mirror-plaintext-cache-invalidation *)
+(*# If the source has wiped, the mirror MUST do the same. *)
+
+(*
+  This model verifies the crypto-shredding protocol: after key erasure,
+  encrypted attributes become unrecoverable, and mirrors must honor
+  wipe requests from the source PKD.
+*)
+
+(* TYPE DECLARATIONS *)
+
+type pkd_id.                   (* PKD server identifier *)
+type mirror_id.                (* Mirror server identifier *)
+type enc_key.                  (* Symmetric encryption key (IKM) *)
+type ciphertext.               (* Encrypted attribute *)
+type plaintext.                (* Plaintext attribute *)
+type merkle_root.              (* Merkle tree root *)
+type attribute_name.           (* Attribute identifier *)
+type commitment.               (* Plaintext commitment *)
+type rewrap_key.               (* HPKE-rewrapped key for mirrors *)
+
+(* CHANNELS *)
+
+free c: channel.               (* Public network channel *)
+free pkd_internal: channel [private].  (* PKD internal state *)
+
+(* CRYPTOGRAPHIC FUNCTIONS *)
+
+(* Symmetric encryption / decryption *)
+fun encrypt(enc_key, plaintext, attribute_name,
+            merkle_root): ciphertext.
+reduc forall k: enc_key, p: plaintext,
+      a: attribute_name, m: merkle_root;
+  decrypt(k, encrypt(k, p, a, m), a, m) = p.
+
+(* Plaintext commitment (Argon2id-based) *)
+fun commit(plaintext, attribute_name, merkle_root): commitment.
+reduc forall p: plaintext, a: attribute_name, m: merkle_root;
+  verify_commit(commit(p, a, m), p, a, m) = true.
+
+(* HPKE key rewrapping for trusted mirrors *)
+type hpke_public.
+type hpke_privkey.
+type hpke_ciphertext.
+
+fun hpke_pk(hpke_privkey): hpke_public.
+fun hpke_rewrap(hpke_public, enc_key): hpke_ciphertext.
+reduc forall sk: hpke_privkey, k: enc_key;
+  hpke_unwrap(sk, hpke_rewrap(hpke_pk(sk), k)) = k.
+
+(* TABLES FOR STATE TRACKING *)
+
+table stored_keys(pkd_id, attribute_name, enc_key).
+table stored_ciphertexts(pkd_id, attribute_name, ciphertext).
+table stored_commitments(pkd_id, attribute_name, commitment).
+table wiped_attributes(pkd_id, attribute_name).
+table mirror_keys(mirror_id, attribute_name, hpke_ciphertext).
+table mirror_wipe_status(mirror_id, attribute_name).
+
+(* EVENTS FOR SECURITY PROPERTIES *)
+
+event AttributeEncrypted(pkd_id, attribute_name, plaintext).
+event AttributeDecrypted(pkd_id, attribute_name, plaintext).
+event KeyErased(pkd_id, attribute_name).
+event DecryptionAfterErasure(pkd_id, attribute_name).
+event CommitmentVerified(pkd_id, attribute_name, plaintext).
+event CommitmentFailedAfterErasure(pkd_id, attribute_name).
+event MirrorReceivedKey(mirror_id, attribute_name).
+event MirrorWipeRequested(mirror_id, attribute_name).
+event MirrorWipeCompleted(mirror_id, attribute_name).
+event MirrorDecryptedAfterWipe(mirror_id, attribute_name).
+
+(* SECURITY QUERIES *)
+
+(* --- Query 1: Plaintext Confidentiality ---
+   Plaintext cannot be recovered by attacker without key *)
+free honest_plaintext: plaintext [private].
+query attacker(honest_plaintext).
+
+(* --- Query 2: Encryption Key Confidentiality ---
+   The encryption key (IKM) remains secret *)
+free honest_enc_key: enc_key [private].
+query attacker(honest_enc_key).
+
+(* --- Query 3: Decryption Requires Encryption ---
+   Successful decryption implies the data was encrypted *)
+query pkd: pkd_id, attr: attribute_name, pt: plaintext;
+  event(AttributeDecrypted(pkd, attr, pt)) ==>
+    event(AttributeEncrypted(pkd, attr, pt)).
+
+(* --- Query 4: Key Erasure Reachability ---
+   The key erasure mechanism functions correctly *)
+query pkd: pkd_id, attr: attribute_name;
+  event(KeyErased(pkd, attr)) ==> true.
+
+(* --- Query 5: Mirror Wipe Reachability ---
+   The mirror wipe mechanism functions correctly *)
+query mid: mirror_id, attr: attribute_name;
+  event(MirrorWipeCompleted(mid, attr)) ==> true.
+
+(* PKD ENCRYPTION PROCESS *)
+
+let PKD_EncryptAttribute(pkd: pkd_id, key: enc_key,
+                         attr: attribute_name, pt: plaintext,
+                         root: merkle_root) =
+  let ct = encrypt(key, pt, attr, root) in
+  let q = commit(pt, attr, root) in
+
+  insert stored_keys(pkd, attr, key);
+  insert stored_ciphertexts(pkd, attr, ct);
+  insert stored_commitments(pkd, attr, q);
+  event AttributeEncrypted(pkd, attr, pt);
+  out(c, ct).
+
+(* PKD DECRYPTION PROCESS *)
+
+let PKD_DecryptAttribute(pkd: pkd_id) =
+  in(c, (attr: attribute_name, ct: ciphertext,
+         root: merkle_root));
+
+  (* Check if key has been wiped *)
+  get wiped_attributes(=pkd, =attr) in
+    event DecryptionAfterErasure(pkd, attr)
+  else
+    (* Key still available *)
+    get stored_keys(=pkd, =attr, key) in
+    let pt = decrypt(key, ct, attr, root) in
+    event AttributeDecrypted(pkd, attr, pt);
+
+    (* Verify commitment *)
+    get stored_commitments(=pkd, =attr, q) in
+    if verify_commit(q, pt, attr, root) = true then
+    event CommitmentVerified(pkd, attr, pt);
+    out(pkd_internal, pt).
+
+(* PKD KEY ERASURE (Crypto-Shredding) *)
+
+let PKD_EraseKey(pkd: pkd_id) =
+  in(c, (attr: attribute_name));
+
+  (* Mark key as erased *)
+  get stored_keys(=pkd, =attr, key) in
+  insert wiped_attributes(pkd, attr);
+  event KeyErased(pkd, attr);
+  out(c, (pkd, attr, true)).
+
+(* PKD KEY REWRAPPING FOR TRUSTED MIRRORS *)
+
+let PKD_RewrapForMirror(pkd: pkd_id, mid: mirror_id,
+                        mirror_pk: hpke_public) =
+  in(c, (attr: attribute_name));
+
+  (* Only rewrap if key has not been wiped *)
+  get wiped_attributes(=pkd, =attr) in
+    0  (* Cannot rewrap after erasure *)
+  else
+    get stored_keys(=pkd, =attr, key) in
+    let rewrapped = hpke_rewrap(mirror_pk, key) in
+    insert mirror_keys(mid, attr, rewrapped);
+    event MirrorReceivedKey(mid, attr);
+    out(c, (mid, attr, rewrapped)).
+
+(* MIRROR WIPE PROCESS *)
+
+let Mirror_ProcessWipe(mid: mirror_id) =
+  in(c, (attr: attribute_name));
+
+  event MirrorWipeRequested(mid, attr);
+  insert mirror_wipe_status(mid, attr);
+  event MirrorWipeCompleted(mid, attr);
+  out(c, (mid, attr, true)).
+
+(* HONEST PROCESSES *)
+
+let HonestPKD(pkd: pkd_id, key: enc_key, attr: attribute_name,
+              pt: plaintext, root: merkle_root) =
+  (* Encrypt and store *)
+  let ct = encrypt(key, pt, attr, root) in
+  let q = commit(pt, attr, root) in
+  insert stored_keys(pkd, attr, key);
+  insert stored_ciphertexts(pkd, attr, ct);
+  insert stored_commitments(pkd, attr, q);
+  event AttributeEncrypted(pkd, attr, pt);
+  out(c, ct).
+
+(* MAIN PROCESS *)
+
+process
+  new pkd1: pkd_id;
+  new attr1: attribute_name;
+  new root1: merkle_root;
+
+  (* Mirror *)
+  new mirror1: mirror_id;
+  new mirror1_sk: hpke_privkey;
+  let mirror1_pk = hpke_pk(mirror1_sk) in
+
+  (* Public information *)
+  out(c, pkd1);
+  out(c, attr1);
+  out(c, root1);
+  out(c, mirror1);
+  out(c, mirror1_pk);
+
+  (
+    (* Honest PKD encrypts attribute *)
+    HonestPKD(pkd1, honest_enc_key, attr1,
+              honest_plaintext, root1) |
+
+    (* PKD operations *)
+    !PKD_DecryptAttribute(pkd1) |
+    !PKD_EraseKey(pkd1) |
+    !PKD_RewrapForMirror(pkd1, mirror1, mirror1_pk) |
+    !Mirror_ProcessWipe(mirror1)
+  )

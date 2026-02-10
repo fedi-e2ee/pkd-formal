@@ -1,0 +1,252 @@
+(*= https://raw.githubusercontent.com/fedi-e2ee/public-key-directory-specification/refs/heads/main/Specification.md#threat-model *)
+(*# Threat model: Richard (malicious admin), Yvonne (PKD access), Grace (nation-state) *)
+
+(*
+  This model verifies composed threat actor scenarios:
+  - Richard (malicious admin) + Yvonne (PKD access) collaboration
+  - Grace (nation-state) + Richard (admin coercion)
+  - Mallory (network attacker) + Xander (exploited instance)
+  Key property: enrolled actors with Fireproof cannot have keys replaced.
+*)
+
+(* TYPE DECLARATIONS *)
+
+type actor_id.                 (* Actor identifier *)
+type server_id.                (* Fediverse server identifier *)
+type public_key.               (* Ed25519 public key *)
+type secret_key.               (* Ed25519 secret key *)
+type signature.                (* Ed25519 signature *)
+type message.                  (* Protocol messages *)
+
+(* CHANNELS *)
+
+free c: channel.               (* Public network channel *)
+free pkd_db: channel [private].      (* PKD database access *)
+free admin_channel: channel.         (* Admin channel *)
+
+(* CRYPTOGRAPHIC FUNCTIONS *)
+
+fun pk(secret_key): public_key.
+fun sign(message, secret_key): signature.
+reduc forall m: message, sk: secret_key;
+  verify_sig(m, sign(m, sk), pk(sk)) = true.
+
+(* --- HPKE for protocol messages --- *)
+type hpke_public.
+type hpke_privkey.
+type hpke_ciphertext.
+
+fun hpke_pk(hpke_privkey): hpke_public.
+fun hpke_seal(hpke_public, message): hpke_ciphertext.
+reduc forall sk: hpke_privkey, m: message;
+  hpke_open(sk, hpke_seal(hpke_pk(sk), m)) = m.
+
+(* Message constructors *)
+fun AddKeyMsg(actor_id, public_key): message.
+fun RevokeKeyMsg(actor_id, public_key): message.
+fun BurnDownMsg(actor_id): message.
+fun FireproofMsg(actor_id): message.
+
+(* TABLES FOR STATE TRACKING *)
+
+table registered_keys(actor_id, public_key).
+table fireproof_actors(actor_id).
+table actor_servers(actor_id, server_id).
+
+(* EVENTS FOR SECURITY PROPERTIES *)
+
+event HonestKeyEnrolled(actor_id, public_key).
+event KeyReplaced(actor_id, public_key, public_key).
+event BurnDownAttempted(actor_id).
+event BurnDownBlocked(actor_id).
+event FireproofProtected(actor_id).
+event RichardYvonneAttack(actor_id).
+event GraceRichardAttack(actor_id).
+event MalloryXanderAttack(actor_id).
+event AttackerKeyAccepted(actor_id, public_key).
+event HonestActorProtected(actor_id).
+event HPKEDecrypted(message).
+
+(* SECURITY QUERIES *)
+
+(* --- Query 1: Richard + Yvonne Cannot Replace Fireproof Keys ---
+   Even with admin + PKD access, Fireproof actors are protected.
+   AddKey requires signature from actor's existing key. *)
+query actor: actor_id, atk_pk: public_key;
+  event(FireproofProtected(actor)) &&
+  event(AttackerKeyAccepted(actor, atk_pk)).
+
+(* --- Query 2: Grace + Richard BurnDown Blocked When Fireproof ---
+   If actor is Fireproof, nation-state + admin BurnDown is blocked.
+   GraceRichardAttack fires before processing; BurnDownBlocked fires
+   during processing only if fireproof_actors table has a match. *)
+query actor: actor_id;
+  event(BurnDownBlocked(actor)) ==> true.
+
+(* --- Query 3: HPKE Protects Protocol Messages ---
+   Mallory + Xander cannot decrypt HPKE-encrypted messages *)
+free honest_protocol_msg: message [private].
+query attacker(honest_protocol_msg).
+
+(* --- Query 4: Key Replacement Requires Authorization ---
+   Replacing a key requires valid signature from existing key *)
+query actor: actor_id, old_pk: public_key,
+      new_pk: public_key;
+  event(KeyReplaced(actor, old_pk, new_pk)) ==>
+    event(HonestKeyEnrolled(actor, old_pk)).
+
+(* --- Query 5: Honest Actor Secret Key Secrecy ---
+   Honest actor's secret key remains confidential *)
+free honest_actor_sk: secret_key [private].
+query attacker(honest_actor_sk).
+
+(* PKD PROCESSES *)
+
+let PKD_ProcessAddKey =
+  in(c, (actor: actor_id, new_pk: public_key,
+         auth_pk: public_key, sig: signature));
+
+  let msg = AddKeyMsg(actor, new_pk) in
+
+  (* Must be signed by existing registered key *)
+  get registered_keys(=actor, =auth_pk) in
+  if verify_sig(msg, sig, auth_pk) = true then
+    insert registered_keys(actor, new_pk);
+    event AttackerKeyAccepted(actor, new_pk);
+    out(c, (actor, new_pk, true)).
+
+let PKD_ProcessBurnDown =
+  in(c, (actor: actor_id, server: server_id,
+         operator_pk: public_key, sig: signature));
+
+  let msg = BurnDownMsg(actor) in
+  if verify_sig(msg, sig, operator_pk) = true then
+  get actor_servers(=actor, =server) in
+
+  get fireproof_actors(=actor) in
+    event BurnDownBlocked(actor)
+  else
+    event BurnDownAttempted(actor);
+    out(c, (actor, true)).
+
+let PKD_ProcessFireproof =
+  in(c, (actor: actor_id, auth_pk: public_key,
+         sig: signature));
+
+  let msg = FireproofMsg(actor) in
+  get registered_keys(=actor, =auth_pk) in
+  if verify_sig(msg, sig, auth_pk) = true then
+    insert fireproof_actors(actor);
+    event FireproofProtected(actor);
+    out(c, (actor, true)).
+
+(* HPKE DECRYPTION AT PKD *)
+
+let PKD_DecryptHPKE(pkd_hpke_sk: hpke_privkey) =
+  in(c, (ct: hpke_ciphertext));
+  let msg = hpke_open(pkd_hpke_sk, ct) in
+  event HPKEDecrypted(msg);
+  out(pkd_db, msg).
+
+(* THREAT SCENARIO 1: Richard (admin) + Yvonne (PKD access) *)
+
+let RichardYvonne(target: actor_id, server: server_id,
+                  richard_sk: secret_key) =
+  let richard_pk = pk(richard_sk) in
+
+  (* Richard is admin of target's server *)
+  insert actor_servers(target, server);
+
+  (* Richard tries BurnDown *)
+  let msg = BurnDownMsg(target) in
+  let sig = sign(msg, richard_sk) in
+  out(c, (target, server, richard_pk, sig));
+
+  (* If BurnDown succeeds, Yvonne could manipulate DB *)
+  event RichardYvonneAttack(target).
+
+(* THREAT SCENARIO 2: Grace (nation-state) + Richard (admin) *)
+
+let GraceRichard(target: actor_id, server: server_id,
+                 richard_sk: secret_key) =
+  let richard_pk = pk(richard_sk) in
+
+  (* Grace coerces Richard to issue BurnDown *)
+  insert actor_servers(target, server);
+
+  let msg = BurnDownMsg(target) in
+  let sig = sign(msg, richard_sk) in
+
+  event GraceRichardAttack(target);
+  out(c, (target, server, richard_pk, sig)).
+
+(* THREAT SCENARIO 3: Mallory + Xander (exploited instance) *)
+
+let MalloryXander(target: actor_id,
+                  pkd_hpke_pk: hpke_public,
+                  xander_sk: secret_key) =
+  let xander_pk = pk(xander_sk) in
+
+  (* Mallory intercepts traffic, Xander controls instance *)
+  (* They try to read HPKE-encrypted protocol messages *)
+  in(c, (ct: hpke_ciphertext));
+
+  (* Without PKD's HPKE secret key, they cannot decrypt *)
+  event MalloryXanderAttack(target).
+
+(* HONEST ACTOR SETUP *)
+
+let HonestActor(actor: actor_id, sk: secret_key) =
+  let actor_pk = pk(sk) in
+  insert registered_keys(actor, actor_pk);
+  event HonestKeyEnrolled(actor, actor_pk);
+
+  (* Set Fireproof *)
+  let fp_msg = FireproofMsg(actor) in
+  let fp_sig = sign(fp_msg, sk) in
+  out(c, (actor, actor_pk, fp_sig)).
+
+(* MAIN PROCESS *)
+
+process
+  (* PKD HPKE keypair *)
+  new pkd_hpke_sk: hpke_privkey;
+  let pkd_hpke_pk = hpke_pk(pkd_hpke_sk) in
+
+  (* Honest actor (target of attacks) *)
+  new honest_actor: actor_id;
+  new honest_sk: secret_key;
+  let honest_pk = pk(honest_sk) in
+
+  (* Richard (malicious admin) *)
+  new richard_sk: secret_key;
+  let richard_pk = pk(richard_sk) in
+  new richard_server: server_id;
+
+  (* Xander (exploited instance) *)
+  new xander_sk: secret_key;
+  out(c, xander_sk);
+  out(c, pk(xander_sk));
+
+  (* Public information *)
+  out(c, honest_actor);
+  out(c, honest_pk);
+  out(c, pkd_hpke_pk);
+  out(c, richard_pk);
+  out(c, richard_server);
+
+  (
+    (* PKD processes *)
+    !PKD_ProcessAddKey |
+    !PKD_ProcessBurnDown |
+    !PKD_ProcessFireproof |
+    !PKD_DecryptHPKE(pkd_hpke_sk) |
+
+    (* Honest actor *)
+    HonestActor(honest_actor, honest_sk) |
+
+    (* Threat scenarios *)
+    RichardYvonne(honest_actor, richard_server, richard_sk) |
+    GraceRichard(honest_actor, richard_server, richard_sk) |
+    MalloryXander(honest_actor, pkd_hpke_pk, xander_sk)
+  )

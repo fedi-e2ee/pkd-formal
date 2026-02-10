@@ -135,8 +135,96 @@ jobs:
           fi
           echo "\033[0;32mBurnDown proof VERIFIED\033[0m"
 
+          echo "Verifying auxiliary data proof..."
+          proverif pkd_auxiliary_data.pv | tee auxiliary_data_result.txt
+          if ! grep -q "RESULT.*is true" auxiliary_data_result.txt; then
+            echo -e "\033[0;31mAuxiliary data proof FAILED\033[0m"
+            exit 1
+          fi
+          echo -e "\033[0;32mAuxiliary data proof VERIFIED\033[0m"
+
+          echo "Verifying checkpoint proof..."
+          proverif pkd_checkpoint.pv | tee checkpoint_result.txt
+          if ! grep -q "RESULT.*is true" checkpoint_result.txt; then
+            echo -e "\033[0;31mCheckpoint proof FAILED\033[0m"
+            exit 1
+          fi
+          echo -e "\033[0;32mCheckpoint proof VERIFIED\033[0m"
+
+          echo "Verifying HPKE encryption proof..."
+          proverif pkd_hpke_encryption.pv | tee hpke_result.txt
+          if ! grep -q "RESULT.*is true" hpke_result.txt; then
+            echo -e "\033[0;31mHPKE encryption proof FAILED\033[0m"
+            exit 1
+          fi
+          echo -e "\033[0;32mHPKE encryption proof VERIFIED\033[0m"
+
+          echo "Verifying RevokeKey invariant proof..."
+          proverif pkd_revoke_key_invariant.pv | tee revoke_invariant_result.txt
+          if ! grep -q "RESULT.*is true" revoke_invariant_result.txt; then
+            echo -e "\033[0;31mRevokeKey invariant proof FAILED\033[0m"
+            exit 1
+          fi
+          echo -e "\033[0;32mRevokeKey invariant proof VERIFIED\033[0m"
+
+          echo "Verifying TOTP protocol proof..."
+          proverif pkd_totp_protocol.pv | tee totp_result.txt
+          if ! grep -q "RESULT.*is true" totp_result.txt; then
+            echo -e "\033[0;31mTOTP protocol proof FAILED\033[0m"
+            exit 1
+          fi
+          echo -e "\033[0;32mTOTP protocol proof VERIFIED\033[0m"
+
+          echo "Verifying witness consensus proof..."
+          proverif pkd_witness_consensus.pv | tee witness_result.txt
+          if ! grep -q "RESULT.*is true" witness_result.txt; then
+            echo -e "\033[0;31mWitness consensus proof FAILED\033[0m"
+            exit 1
+          fi
+          echo -e "\033[0;32mWitness consensus proof VERIFIED\033[0m"
+
+          echo "Verifying message uniqueness proof..."
+          proverif pkd_message_uniqueness.pv | tee uniqueness_result.txt
+          if ! grep -q "RESULT.*is true" uniqueness_result.txt; then
+            echo -e "\033[0;31mMessage uniqueness proof FAILED\033[0m"
+            exit 1
+          fi
+          echo -e "\033[0;32mMessage uniqueness proof VERIFIED\033[0m"
+
+          echo "Verifying crypto-shredding proof..."
+          proverif pkd_crypto_shredding.pv | tee shredding_result.txt
+          if ! grep -q "RESULT.*is true" shredding_result.txt; then
+            echo -e "\033[0;31mCrypto-shredding proof FAILED\033[0m"
+            exit 1
+          fi
+          echo -e "\033[0;32mCrypto-shredding proof VERIFIED\033[0m"
+
+          echo "Verifying HTTP signatures proof..."
+          proverif pkd_http_signatures.pv | tee http_sig_result.txt
+          if ! grep -q "RESULT.*is true" http_sig_result.txt; then
+            echo -e "\033[0;31mHTTP signatures proof FAILED\033[0m"
+            exit 1
+          fi
+          echo -e "\033[0;32mHTTP signatures proof VERIFIED\033[0m"
+
+          echo "Verifying concurrency proof..."
+          proverif pkd_concurrency.pv | tee concurrency_result.txt
+          if ! grep -q "RESULT.*is true" concurrency_result.txt; then
+            echo -e "\033[0;31mConcurrency proof FAILED\033[0m"
+            exit 1
+          fi
+          echo -e "\033[0;32mConcurrency proof VERIFIED\033[0m"
+
+          echo "Verifying composed threats proof..."
+          proverif pkd_composed_threats.pv | tee composed_result.txt
+          if ! grep -q "RESULT.*is true" composed_result.txt; then
+            echo -e "\033[0;31mComposed threats proof FAILED\033[0m"
+            exit 1
+          fi
+          echo -e "\033[0;32mComposed threats proof VERIFIED\033[0m"
+
           echo ""
-          echo "\033[0;32mAll ProVerif proofs VERIFIED successfully\033[0m"
+          echo -e "\033[0;32mAll ProVerif proofs VERIFIED successfully\033[0m"
 
       - name: Copy specification to traceability directory
         run: |

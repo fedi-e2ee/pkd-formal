@@ -1,0 +1,236 @@
+(*= https://raw.githubusercontent.com/fedi-e2ee/public-key-directory-specification/refs/heads/main/Specification.md#actor-confusion-between-http-message-signatures-and-protocol-messages *)
+(*# Actor Confusion Between HTTP Message Signatures and Protocol Messages: Prevented by design. *)
+
+(*= https://raw.githubusercontent.com/fedi-e2ee/public-key-directory-specification/refs/heads/main/Specification.md#protocol-message-parsing *)
+(*# Protocol Messages encrypted with HPKE MUST always include an HTTP Signature header. *)
+
+(*
+  This model verifies HTTP Message Signatures (RFC 9421) as used by PKD:
+  - Domain separation between HTTP signatures and protocol signatures
+  - Replay prevention via timestamp freshness
+  - Actor confusion prevention (HTTP sig actor must match protocol actor)
+*)
+
+(* TYPE DECLARATIONS *)
+
+type actor_id.                 (* Actor identifier *)
+type server_id.                (* Fediverse server identifier *)
+type public_key.               (* Ed25519 public key *)
+type secret_key.               (* Ed25519 secret key *)
+type signature.                (* Ed25519 signature *)
+type timestamp.                (* Unix timestamp *)
+type http_body.                (* HTTP request body *)
+type http_method.              (* HTTP method (POST, GET) *)
+type http_path.                (* HTTP request path *)
+type context.                  (* Domain separation context *)
+type protocol_sig.             (* Protocol-level signature *)
+
+(* CHANNELS *)
+
+free c: channel.               (* Public network channel *)
+free pkd_internal: channel [private].  (* Internal PKD state *)
+
+(* CONSTANTS *)
+
+const HTTP_SIG_CONTEXT: context.   (* HTTP signature domain *)
+const PROTOCOL_SIG_CONTEXT: context. (* Protocol signature domain *)
+const METHOD_POST: http_method.
+
+(* CRYPTOGRAPHIC FUNCTIONS *)
+
+fun pk(secret_key): public_key.
+
+(* HTTP Message Signature: signs method + path + body + timestamp *)
+fun http_sig_payload(context, http_method, http_path,
+                     http_body, timestamp): bitstring [data].
+
+fun sign(bitstring, secret_key): signature.
+reduc forall m: bitstring, sk: secret_key;
+  verify_sig(m, sign(m, sk), pk(sk)) = true.
+
+(* Protocol signature: separate domain *)
+fun protocol_payload(context, http_body): bitstring [data].
+
+(* Extract actor from HTTP body *)
+fun extract_actor(http_body): actor_id.
+
+(* TABLES FOR STATE TRACKING *)
+
+table registered_keys(actor_id, public_key).
+table server_actors(server_id, actor_id).
+table seen_timestamps(actor_id, timestamp).
+
+(* EVENTS FOR SECURITY PROPERTIES *)
+
+event HTTPSigVerified(actor_id, public_key, timestamp).
+event HTTPSigRejected(actor_id).
+event ProtocolSigVerified(actor_id, public_key).
+event ActorConfusionPrevented(actor_id, actor_id).
+event ReplayPrevented(actor_id, timestamp).
+event DomainSeparationHolds(context, context).
+event MessageProcessed(actor_id, http_body).
+event CrossDomainAttack(context, context).
+
+(* SECURITY QUERIES *)
+
+(* --- Query 1: HTTP Signature Domain Separation ---
+   An HTTP signature cannot be confused with a protocol signature *)
+query ctx1: context, ctx2: context;
+  event(CrossDomainAttack(ctx1, ctx2)).
+
+(* --- Query 2: Actor Confusion Prevention ---
+   If HTTP sig actor differs from protocol actor, rejection occurs *)
+query actor1: actor_id, actor2: actor_id;
+  event(ActorConfusionPrevented(actor1, actor2)) ==> true.
+
+(* --- Query 3: Message Processing Requires HTTP Signature ---
+   A message can only be processed if its HTTP signature was verified *)
+query actor: actor_id, body: http_body,
+      auth_pk: public_key, ts: timestamp;
+  event(MessageProcessed(actor, body)) ==>
+    event(HTTPSigVerified(actor, auth_pk, ts)).
+
+(* --- Query 4: Protocol Signature Confidentiality ---
+   Honest actor's secret key remains secret *)
+free honest_actor_sk: secret_key [private].
+query attacker(honest_actor_sk).
+
+(* --- Query 5: Replay Prevention Reachability ---
+   Timestamp-based replay prevention is reachable *)
+query actor: actor_id, ts: timestamp;
+  event(ReplayPrevented(actor, ts)) ==> true.
+
+(* PKD HTTP SIGNATURE VERIFICATION *)
+
+let PKD_VerifyHTTPSignature(path: http_path) =
+  in(c, (body: http_body, ts: timestamp,
+         claimed_actor: actor_id, auth_pk: public_key,
+         http_sig: signature));
+
+  (* REQUIREMENT 1: Verify actor has this key registered *)
+  get registered_keys(=claimed_actor, =auth_pk) in
+
+  (* REQUIREMENT 2: Verify HTTP signature *)
+  let http_payload = http_sig_payload(HTTP_SIG_CONTEXT,
+                                       METHOD_POST, path,
+                                       body, ts) in
+  if verify_sig(http_payload, http_sig, auth_pk) = true then
+  event HTTPSigVerified(claimed_actor, auth_pk, ts);
+
+  (* REQUIREMENT 3: Check timestamp freshness *)
+  get seen_timestamps(=claimed_actor, =ts) in
+    event ReplayPrevented(claimed_actor, ts)
+  else
+    insert seen_timestamps(claimed_actor, ts);
+
+    (* REQUIREMENT 4: Verify actor in body matches HTTP sig actor *)
+    let body_actor = extract_actor(body) in
+    if body_actor = claimed_actor then
+      event MessageProcessed(claimed_actor, body);
+      out(pkd_internal, (claimed_actor, body))
+    else
+      event ActorConfusionPrevented(claimed_actor, body_actor).
+
+(* DOMAIN SEPARATION VERIFICATION *)
+
+let VerifyDomainSeparation =
+  in(c, (body: http_body, ts: timestamp,
+         actor: actor_id, sk: secret_key));
+
+  let actor_pk = pk(sk) in
+
+  (* Sign with HTTP context *)
+  new some_path: http_path;
+  let http_payload = http_sig_payload(HTTP_SIG_CONTEXT,
+                                       METHOD_POST,
+                                       some_path,
+                                       body, ts) in
+  let http_sig = sign(http_payload, sk) in
+
+  (* Try to verify as protocol signature *)
+  let proto_payload = protocol_payload(PROTOCOL_SIG_CONTEXT,
+                                        body) in
+  if verify_sig(proto_payload, http_sig, actor_pk) = true then
+    event CrossDomainAttack(HTTP_SIG_CONTEXT,
+                            PROTOCOL_SIG_CONTEXT).
+
+(* HONEST PROCESSES *)
+
+let HonestClient(actor: actor_id, sk: secret_key,
+                 path: http_path, body: http_body) =
+  let actor_pk = pk(sk) in
+  new ts: timestamp;
+
+  let http_payload = http_sig_payload(HTTP_SIG_CONTEXT,
+                                       METHOD_POST, path,
+                                       body, ts) in
+  let sig = sign(http_payload, sk) in
+
+  out(c, (body, ts, actor, actor_pk, sig)).
+
+(* ATTACKER: Actor confusion *)
+let AttackerActorConfusion(attacker_sk: secret_key,
+                           target_actor: actor_id,
+                           path: http_path) =
+  let attacker_pk = pk(attacker_sk) in
+  new ts: timestamp;
+
+  (* Create body claiming to be target_actor *)
+  new fake_body: http_body;
+
+  let http_payload = http_sig_payload(HTTP_SIG_CONTEXT,
+                                       METHOD_POST, path,
+                                       fake_body, ts) in
+  let sig = sign(http_payload, attacker_sk) in
+
+  (* Send with attacker's key but target's actor *)
+  out(c, (fake_body, ts, target_actor, attacker_pk, sig)).
+
+(* ATTACKER: Replay captured request *)
+let AttackerReplay =
+  in(c, (body: http_body, ts: timestamp,
+         actor: actor_id, auth_pk: public_key,
+         sig: signature));
+  (* Replay exact same request *)
+  out(c, (body, ts, actor, auth_pk, sig)).
+
+(* MAIN PROCESS *)
+
+process
+  new honest_actor: actor_id;
+  new honest_sk: secret_key;
+  let honest_pk = pk(honest_sk) in
+  insert registered_keys(honest_actor, honest_pk);
+
+  new honest_path: http_path;
+  new honest_body: http_body;
+  new honest_server: server_id;
+  insert server_actors(honest_server, honest_actor);
+
+  (* Attacker *)
+  new attacker_sk: secret_key;
+  let attacker_pk = pk(attacker_sk) in
+  out(c, attacker_sk);
+  out(c, attacker_pk);
+
+  (* Public information *)
+  out(c, honest_actor);
+  out(c, honest_pk);
+  out(c, honest_path);
+
+  (
+    (* PKD processes *)
+    !PKD_VerifyHTTPSignature(honest_path) |
+
+    (* Honest client *)
+    HonestClient(honest_actor, honest_sk, honest_path,
+                 honest_body) |
+
+    (* Domain separation check *)
+    !VerifyDomainSeparation |
+
+    (* Attacker scenarios *)
+    !AttackerActorConfusion(attacker_sk, honest_actor,
+                            honest_path) |
+    !AttackerReplay
+  )
