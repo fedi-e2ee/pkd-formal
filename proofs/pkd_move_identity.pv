@@ -36,6 +36,14 @@ reduc forall m: bitstring, sk: secret_key;
 fun MoveIdentityMsg(actor_id, actor_id): bitstring.
 
 (* ============================================================================
+   TABLES
+   ============================================================================ *)
+
+table registered_keys(actor_id, public_key).
+table server_keys(server_id, public_key).
+table actor_servers(actor_id, server_id).
+
+(* ============================================================================
    EVENTS
    ============================================================================ *)
 
@@ -78,60 +86,63 @@ query old_actor: actor_id, new_actor: actor_id;
    PKD PROCESS - Models the validation logic
    ============================================================================ *)
 
-let PKD_ProcessMoveIdentity(
-  (* Registered key for old actor *)
-  old_actor: actor_id, old_actor_pk: public_key,
-  (* Whether target has keys *)
-  new_actor: actor_id, target_has_keys: bool,
-  (* New server's public key for HTTP sig verification *)
-  new_server_pk: public_key
-) =
+let PKD_ProcessMoveIdentity =
   in(c, (claimed_old: actor_id, claimed_new: actor_id,
          protocol_sig: bitstring, http_sig: bitstring,
-         claimed_old_pk: public_key, claimed_server_pk: public_key));
+         claimed_old_pk: public_key,
+         new_server: server_id,
+         claimed_server_pk: public_key));
 
   let msg = MoveIdentityMsg(claimed_old, claimed_new) in
 
   (* REQUIREMENT 1: Verify protocol signature *)
-  if protocol_verify(msg, protocol_sig, claimed_old_pk) = true then
+  if protocol_verify(
+    msg, protocol_sig, claimed_old_pk
+  ) = true then
   event ProtocolSigVerified(claimed_old, claimed_old_pk);
 
-  (* REQUIREMENT 2: Check claimed key matches registered key for old actor *)
-  if claimed_old = old_actor then
-  if claimed_old_pk = old_actor_pk then
+  (* REQUIREMENT 2: Old actor's key must be registered *)
+  get registered_keys(=claimed_old, =claimed_old_pk) in
   event OldActorKeyVerified(claimed_old, claimed_old_pk);
 
   (* REQUIREMENT 3: Verify HTTP signature from new server *)
   let http_payload = (claimed_old, claimed_new) in
-  if http_verify(http_payload, http_sig, claimed_server_pk) = true then
+  if http_verify(
+    http_payload, http_sig, claimed_server_pk
+  ) = true then
+  (* Verify server key is registered *)
+  get server_keys(=new_server, =claimed_server_pk) in
+  (* Verify new actor belongs to this server *)
+  get actor_servers(=claimed_new, =new_server) in
   event HTTPSigVerified(claimed_new, claimed_server_pk);
 
-  (* REQUIREMENT 4: Check target actor has no keys *)
-  if claimed_new = new_actor then
-  if target_has_keys = false then
-  (
+  (* REQUIREMENT 4: Dynamic check — target has no keys *)
+  get registered_keys(=claimed_new, any_pk) in
+    (* Target already has keys — reject *)
+    event TargetHasKeys(claimed_new)
+  else
+    (* Target is empty — accept *)
     event TargetEmpty(claimed_new);
     event IdentityMoved(claimed_old, claimed_new);
-    out(c, (claimed_old, claimed_new))
-  )
-  else
-  (
-    event TargetHasKeys(claimed_new)
-  ).
+    out(c, (claimed_old, claimed_new)).
 
 (* ============================================================================
    HONEST ACTOR - Legitimate migration
    ============================================================================ *)
 
-let HonestMigration(old_actor: actor_id, new_actor: actor_id,
-                     actor_sk: secret_key, server_sk: secret_key) =
+let HonestMigration(
+  old_actor: actor_id, new_actor: actor_id,
+  actor_sk: secret_key,
+  new_server: server_id, server_sk: secret_key
+) =
   let actor_pk = pk(actor_sk) in
   let server_pk = pk(server_sk) in
   let msg = MoveIdentityMsg(old_actor, new_actor) in
-  let protocol_sig = protocol_sign(msg, actor_sk) in
+  let psig = protocol_sign(msg, actor_sk) in
   let http_payload = (old_actor, new_actor) in
-  let http_sig = http_sign(http_payload, server_sk) in
-  out(c, (old_actor, new_actor, protocol_sig, http_sig, actor_pk, server_pk)).
+  let hsig = http_sign(http_payload, server_sk) in
+  out(c, (old_actor, new_actor, psig, hsig,
+          actor_pk, new_server, server_pk)).
 
 (* ============================================================================
    MAIN PROCESS
@@ -142,16 +153,23 @@ process
   new honest_old_actor: actor_id;
   new honest_actor_sk: secret_key;
   let honest_actor_pk = pk(honest_actor_sk) in
+  insert registered_keys(honest_old_actor, honest_actor_pk);
 
   (* Honest new actor (empty, no keys) *)
   new honest_new_actor: actor_id;
 
   (* Honest new server *)
+  new honest_server_id: server_id;
   new honest_server_sk: secret_key;
   let honest_server_pk = pk(honest_server_sk) in
+  insert server_keys(honest_server_id, honest_server_pk);
+  insert actor_servers(honest_new_actor, honest_server_id);
 
   (* Target actor that already has keys *)
   new occupied_target: actor_id;
+  new occupied_sk: secret_key;
+  let occupied_pk = pk(occupied_sk) in
+  insert registered_keys(occupied_target, occupied_pk);
 
   (* Attacker *)
   new attacker_sk: secret_key;
@@ -169,15 +187,11 @@ process
   out(c, honest_server_pk);
 
   (
-    (* PKD accepts move to empty target *)
-    PKD_ProcessMoveIdentity(honest_old_actor, honest_actor_pk,
-                            honest_new_actor, false, honest_server_pk) |
-
-    (* PKD rejects move to occupied target *)
-    PKD_ProcessMoveIdentity(honest_old_actor, honest_actor_pk,
-                            occupied_target, true, honest_server_pk) |
+    (* PKD processes MoveIdentity dynamically *)
+    !PKD_ProcessMoveIdentity |
 
     (* Honest migration attempt *)
     HonestMigration(honest_old_actor, honest_new_actor,
-                    honest_actor_sk, honest_server_sk)
+                    honest_actor_sk, honest_server_id,
+                    honest_server_sk)
   )

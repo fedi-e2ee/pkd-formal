@@ -6,7 +6,8 @@
 
 (* TYPE DECLARATIONS *)
 
-type actor_id.                 (* Actor identifier (e.g., @user@domain) *)
+type actor_id.                 (* Actor identifier *)
+type server_id.                (* Fediverse server *)
 type public_key.               (* Ed25519 public key *)
 type secret_key.               (* Ed25519 secret key *)
 type signature.                (* Ed25519 signature *)
@@ -26,10 +27,17 @@ fun sign(message, secret_key): signature.
 reduc forall m: message, sk: secret_key;
   verify(m, sign(m, sk), pk(sk)) = true.
 
+(* --- HTTP Signatures (domain separation from protocol sigs) --- *)
+fun http_sign(bitstring, secret_key): signature.
+reduc forall m: bitstring, sk: secret_key;
+  http_verify(m, http_sign(m, sk), pk(sk)) = true.
+
 (* --- Message Construction --- *)
 fun AddKeyMsg(actor_id, public_key): message.
 fun RevokeKeyMsg(actor_id, public_key): message.
-fun RevokeKeyThirdPartyMsg(actor_id, public_key, actor_id): message.
+fun RevokeKeyThirdPartyMsg(
+  actor_id, public_key, actor_id
+): message.
 
 (* TABLES FOR STATE TRACKING *)
 
@@ -38,6 +46,12 @@ table registered_keys(actor_id, public_key).
 
 (* Track which keys have been revoked *)
 table revoked_keys(actor_id, public_key).
+
+(* Server signing keys for HTTP signatures *)
+table server_keys(server_id, public_key).
+
+(* Actor-to-server mapping *)
+table actor_servers(actor_id, server_id).
 
 (* EVENTS FOR SECURITY PROPERTIES *)
 
@@ -53,6 +67,10 @@ event AuthorizedByExisting(actor_id, public_key, public_key). (* Authorized by e
 (* Attack detection events *)
 event UnauthorizedKeyAttempt(actor_id, public_key).
 event InvalidSignatureAttempt(actor_id).
+
+(* HTTP signature + actor matching events *)
+event HTTPSigVerified(actor_id, server_id).
+event ActorMatchVerified(actor_id, server_id).
 
 (* SECURITY QUERIES *)
 
@@ -74,10 +92,27 @@ free honest_sk: secret_key [private].
 query attacker(honest_sk).
 
 (* --- Query 4: No Unauthorized Keys ---
-   An attacker cannot add keys for an honest actor without their secret key. *)
+   An attacker cannot add keys for an honest actor
+   without their secret key. *)
 free honest_actor: actor_id.
 free attacker_pk: public_key.
 query event(FirstKeyAdded(honest_actor, attacker_pk)).
+
+(* --- Query 5: HTTP Signature Required ---
+   First key addition requires HTTP signature from
+   the actor's server. *)
+query a: actor_id, pk_val: public_key,
+      sid: server_id;
+  event(FirstKeyAdded(a, pk_val)) ==>
+    event(HTTPSigVerified(a, sid)).
+
+(* --- Query 6: Actor Must Match Server ---
+   The actor in the message must match the actor
+   authenticated by the HTTP signature. *)
+query a: actor_id, pk_val: public_key,
+      sid: server_id;
+  event(FirstKeyAdded(a, pk_val)) ==>
+    event(ActorMatchVerified(a, sid)).
 
 (* PKD SERVER PROCESSES *)
 
@@ -85,8 +120,21 @@ query event(FirstKeyAdded(honest_actor, attacker_pk)).
    This process handles the first key registration for an actor.
    The message must be self-signed by the key being added. *)
 let PKD_ProcessFirstAddKey =
-  in(c, (actor: actor_id, new_pk: public_key, sig: signature));
+  in(c, (actor: actor_id, new_pk: public_key,
+         sig: signature,
+         server: server_id, http_sig: signature));
   let msg = AddKeyMsg(actor, new_pk) in
+
+  (* REQUIREMENT: HTTP signature from server *)
+  get server_keys(=server, server_pk) in
+  let http_payload = (actor, new_pk) in
+  if http_verify(http_payload, http_sig, server_pk) = true
+  then
+  event HTTPSigVerified(actor, server);
+
+  (* REQUIREMENT: Actor must belong to this server *)
+  get actor_servers(=actor, =server) in
+  event ActorMatchVerified(actor, server);
 
   (* Check: actor must not already have any keys *)
   get registered_keys(=actor, existing_pk) in
@@ -156,11 +204,16 @@ let PKD_ProcessRevokeKey =
 (* HONEST ACTOR PROCESS *)
 
 (* Honest actor who properly registers their first key *)
-let HonestActor(actor: actor_id, sk: secret_key) =
+let HonestActor(
+  actor: actor_id, sk: secret_key,
+  server: server_id, server_sk: secret_key
+) =
   let pk_val = pk(sk) in
   let msg = AddKeyMsg(actor, pk_val) in
   let sig = sign(msg, sk) in
-  out(c, (actor, pk_val, sig)).
+  let http_payload = (actor, pk_val) in
+  let http_sig = http_sign(http_payload, server_sk) in
+  out(c, (actor, pk_val, sig, server, http_sig)).
 
 (* Honest actor adding a second key (authorized by first) *)
 let HonestActorAddSecondKey(actor: actor_id, existing_sk: secret_key, new_pk: public_key) =
@@ -186,11 +239,23 @@ process
   new honest_sk_gen: secret_key;
   let honest_pk = pk(honest_sk_gen) in
 
+  (* Honest server *)
+  new honest_server: server_id;
+  new honest_server_sk: secret_key;
+  let honest_server_pk = pk(honest_server_sk) in
+  insert server_keys(honest_server, honest_server_pk);
+  insert actor_servers(honest_actor, honest_server);
+
   (* Generate attacker's key *)
   new attacker_sk: secret_key;
   let attacker_pk_val = pk(attacker_sk) in
-  out(c, attacker_pk_val);  (* Attacker's public key is public *)
-  out(c, attacker_sk);       (* For symbolic model, attacker controls their sk *)
+  out(c, attacker_pk_val);
+  out(c, attacker_sk);
+
+  (* Public information *)
+  out(c, honest_actor);
+  out(c, honest_server);
+  out(c, honest_server_pk);
 
   (
     (* PKD server processes *)
@@ -199,8 +264,6 @@ process
     !PKD_ProcessRevokeKey |
 
     (* Honest actor registers their key *)
-    HonestActor(honest_actor, honest_sk_gen) |
-
-    (* Publish honest actor's ID *)
-    out(c, honest_actor)
+    HonestActor(honest_actor, honest_sk_gen,
+                honest_server, honest_server_sk)
   )

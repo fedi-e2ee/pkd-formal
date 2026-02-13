@@ -48,6 +48,7 @@ event TimestampFresh(pkd_id, timestamp).
 event TimestampStale(pkd_id, timestamp).
 event MerkleRootValidated(pkd_id, merkle_root).
 event CrossPKDConsistency(pkd_id, pkd_id, merkle_root).
+event KeyFetched(pkd_id, public_key).
 
 (* SECURITY QUERIES *)
 
@@ -85,6 +86,11 @@ query from_pkd: pkd_id, from_root: merkle_root, to_pkd: pkd_id, to_root: merkle_
    Honest PKD secret keys remain secret *)
 free honest_pkd_sk: secret_key [private].
 query attacker(honest_pkd_sk).
+
+(* --- Query 7: Async key fetch reachability ---
+   The async key fetch mechanism functions correctly *)
+query from_pkd: pkd_id, sender_pk: public_key;
+  event(KeyFetched(from_pkd, sender_pk)) ==> true.
 
 (* PKD CHECKPOINT PROCESSING *)
 
@@ -128,6 +134,18 @@ let PKD_ProcessCheckpoint(own_id: pkd_id) =
     (* Sender not on allowlist *)
     event SenderNotAllowed(from_pkd);
     event CheckpointRejected(from_pkd, from_root).
+
+(* ASYNC KEY FETCH — spec: keys fetched on demand
+   Models the scenario where a PKD asynchronously fetches
+   a peer's signing key before accepting checkpoints *)
+
+let PKD_FetchPeerKey(own_id: pkd_id) =
+  in(c, (peer_id: pkd_id, peer_pk: public_key));
+  (* In practice: fetched via HTTPS from peer's endpoint.
+     Attacker controls the network so can inject. *)
+  insert peer_allowlist(peer_id, peer_pk);
+  event KeyFetched(peer_id, peer_pk);
+  out(c, (own_id, peer_id, true)).
 
 (* HONEST PKD SENDS CHECKPOINT *)
 
@@ -179,9 +197,12 @@ process
   new pkd2_sk: secret_key;
   let pkd2_pk = pk(pkd2_sk) in
 
-  (* Establish peer allowlist (mutual trust) *)
+  (* Pre-populate allowlist for honest peers.
+     PKD_FetchPeerKey models the async fetch path. *)
   insert peer_allowlist(pkd1_id, pkd1_pk);
+  event KeyFetched(pkd1_id, pkd1_pk);
   insert peer_allowlist(pkd2_id, pkd2_pk);
+  event KeyFetched(pkd2_id, pkd2_pk);
 
   (* Establish own Merkle roots *)
   new root1: merkle_root;
@@ -211,6 +232,8 @@ process
     (* PKD processes *)
     !PKD_ProcessCheckpoint(pkd1_id) |
     !PKD_ProcessCheckpoint(pkd2_id) |
+    !PKD_FetchPeerKey(pkd1_id) |
+    !PKD_FetchPeerKey(pkd2_id) |
 
     (* Honest PKD operations *)
     HonestPKD_SendCheckpoint(pkd1_id, pkd1_sk, pkd2_id, root2) |

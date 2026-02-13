@@ -393,11 +393,16 @@ SPECIFICATION: [Public Key Directory Specification](https://raw.githubuserconten
     TEXT[implementation]: Derive an encryption key, `Ek`, and nonce, `n`, through [`KDF`](#version-1-functions)
     TEXT[implementation]: Derive an authentication key, `Ak`, through [`KDF`](#version-1-functions)
     TEXT[implementation]: Derive a commitment salt, `s`, as the [`Hash`](#version-1-functions)
+    TEXT[implementation]:    truncated to 128 bits (big endian / the least significant bits).
     TEXT[implementation]: Calculate [a commitment of the plaintext
     TEXT[implementation]: Encrypt the plaintext attribute using [`Stream`](#version-1-functions), with the nonce set to `n`, to obtain the
     TEXT[implementation]:    ciphertext, `c`.
-    TEXT[implementation]: Calculate the [`MAC`](#version-1-functions)
+    TEXT[implementation]: Truncate the HMAC output to the rightmost 32 bytes (256 bits)
     TEXT[implementation]: Return `h || r || Q || t || c`.
+
+  SECTION: [Message Attribute Decryption Algorithm](#message-attribute-decryption-algorithm)
+    TEXT[implementation]: Truncate the HMAC output to the rightmost 32 bytes (256 bits)
+    TEXT[implementation]:     truncated to 128 bits (big endian / the least significant bits).
 
   SECTION: [Client-Side Behavior](#client-side-behavior)
     TEXT[!MUST]: BurnDown messages **MUST NOT** use HPKE

@@ -2,7 +2,6 @@ name: Verify Proofs and Traceability
 
 on:
   push:
-    branches: [main]
   pull_request:
     branches: [main]
   schedule:
@@ -67,7 +66,7 @@ jobs:
 
       - name: Cache duvet
         id: cache-duvet
-        uses: actions/cache@v4
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306  # v5.0.3
         with:
           path: ~/.cargo/bin/duvet
           key: ${{ runner.os }}-duvet-0.4.1
@@ -76,155 +75,11 @@ jobs:
         if: steps.cache-duvet.outputs.cache-hit != 'true'
         run: cargo install duvet --version 0.4.1 --locked
 
-      - name: Verify ProVerif proofs
-        run: |
-          cd proofs
-          echo "Verifying attribute encryption proof..."
-          proverif pkd_attribute_encryption.pv | tee attr_encryption_result.txt
-          if ! grep -q "RESULT.*is true" attr_encryption_result.txt; then
-            echo -e "\033[0;31mAttribute encryption proof FAILED\033[0m"
-            exit 1
-          fi
-          echo -e "\033[0;32mAttribute encryption proof VERIFIED\033[0m"
+      - name: Make scripts executable
+        run: chmod +x ./scripts/verify-proofs.sh
 
-          echo "Verifying Merkle tree proof..."
-          proverif pkd_merkle_tree.pv | tee merkle_tree_result.txt
-          if ! grep -q "RESULT.*is true" merkle_tree_result.txt; then
-            echo -e "\033[0;31mMerkle tree proof FAILED\033[0m"
-            exit 1
-          fi
-          echo -e "\033[0;32mMerkle tree proof VERIFIED\033[0m"
-
-          echo "Verifying protocol state machine proof..."
-          proverif pkd_protocol_state_machine.pv | tee state_machine_result.txt
-          if ! grep -q "RESULT.*is true" state_machine_result.txt; then
-            echo "\033[0;31mProtocol state machine proof FAILED\033[0m"
-            exit 1
-          fi
-          echo "\033[0;32mProtocol state machine proof VERIFIED\033[0m"
-
-          echo "Verifying RevokeKeyThirdParty proof..."
-          proverif pkd_revoke_key_third_party.pv | tee revoke_third_party_result.txt
-          if ! grep -q "RESULT.*is true" revoke_third_party_result.txt; then
-            echo "\033[0;31mRevokeKeyThirdParty proof FAILED\033[0m"
-            exit 1
-          fi
-          echo "\033[0;32mRevokeKeyThirdParty proof VERIFIED\033[0m"
-
-          echo "Verifying MoveIdentity proof..."
-          proverif pkd_move_identity.pv | tee move_identity_result.txt
-          if ! grep -q "RESULT.*is true" move_identity_result.txt; then
-            echo "\033[0;31mMoveIdentity proof FAILED\033[0m"
-            exit 1
-          fi
-          echo "\033[0;32mMoveIdentity proof VERIFIED\033[0m"
-
-          echo "Verifying PAE encoding proof..."
-          proverif pkd_pae_encoding.pv | tee pae_encoding_result.txt
-          if ! grep -q "RESULT.*is true" pae_encoding_result.txt; then
-            echo "\033[0;31mPAE encoding proof FAILED\033[0m"
-            exit 1
-          fi
-          echo "\033[0;32mPAE encoding proof VERIFIED\033[0m"
-
-          echo "Verifying BurnDown authorization proof..."
-          proverif pkd_burn_down.pv | tee burn_down_result.txt
-          if ! grep -q "RESULT.*is true" burn_down_result.txt; then
-            echo "\033[0;31mBurnDown proof FAILED\033[0m"
-            exit 1
-          fi
-          echo "\033[0;32mBurnDown proof VERIFIED\033[0m"
-
-          echo "Verifying auxiliary data proof..."
-          proverif pkd_auxiliary_data.pv | tee auxiliary_data_result.txt
-          if ! grep -q "RESULT.*is true" auxiliary_data_result.txt; then
-            echo -e "\033[0;31mAuxiliary data proof FAILED\033[0m"
-            exit 1
-          fi
-          echo -e "\033[0;32mAuxiliary data proof VERIFIED\033[0m"
-
-          echo "Verifying checkpoint proof..."
-          proverif pkd_checkpoint.pv | tee checkpoint_result.txt
-          if ! grep -q "RESULT.*is true" checkpoint_result.txt; then
-            echo -e "\033[0;31mCheckpoint proof FAILED\033[0m"
-            exit 1
-          fi
-          echo -e "\033[0;32mCheckpoint proof VERIFIED\033[0m"
-
-          echo "Verifying HPKE encryption proof..."
-          proverif pkd_hpke_encryption.pv | tee hpke_result.txt
-          if ! grep -q "RESULT.*is true" hpke_result.txt; then
-            echo -e "\033[0;31mHPKE encryption proof FAILED\033[0m"
-            exit 1
-          fi
-          echo -e "\033[0;32mHPKE encryption proof VERIFIED\033[0m"
-
-          echo "Verifying RevokeKey invariant proof..."
-          proverif pkd_revoke_key_invariant.pv | tee revoke_invariant_result.txt
-          if ! grep -q "RESULT.*is true" revoke_invariant_result.txt; then
-            echo -e "\033[0;31mRevokeKey invariant proof FAILED\033[0m"
-            exit 1
-          fi
-          echo -e "\033[0;32mRevokeKey invariant proof VERIFIED\033[0m"
-
-          echo "Verifying TOTP protocol proof..."
-          proverif pkd_totp_protocol.pv | tee totp_result.txt
-          if ! grep -q "RESULT.*is true" totp_result.txt; then
-            echo -e "\033[0;31mTOTP protocol proof FAILED\033[0m"
-            exit 1
-          fi
-          echo -e "\033[0;32mTOTP protocol proof VERIFIED\033[0m"
-
-          echo "Verifying witness consensus proof..."
-          proverif pkd_witness_consensus.pv | tee witness_result.txt
-          if ! grep -q "RESULT.*is true" witness_result.txt; then
-            echo -e "\033[0;31mWitness consensus proof FAILED\033[0m"
-            exit 1
-          fi
-          echo -e "\033[0;32mWitness consensus proof VERIFIED\033[0m"
-
-          echo "Verifying message uniqueness proof..."
-          proverif pkd_message_uniqueness.pv | tee uniqueness_result.txt
-          if ! grep -q "RESULT.*is true" uniqueness_result.txt; then
-            echo -e "\033[0;31mMessage uniqueness proof FAILED\033[0m"
-            exit 1
-          fi
-          echo -e "\033[0;32mMessage uniqueness proof VERIFIED\033[0m"
-
-          echo "Verifying crypto-shredding proof..."
-          proverif pkd_crypto_shredding.pv | tee shredding_result.txt
-          if ! grep -q "RESULT.*is true" shredding_result.txt; then
-            echo -e "\033[0;31mCrypto-shredding proof FAILED\033[0m"
-            exit 1
-          fi
-          echo -e "\033[0;32mCrypto-shredding proof VERIFIED\033[0m"
-
-          echo "Verifying HTTP signatures proof..."
-          proverif pkd_http_signatures.pv | tee http_sig_result.txt
-          if ! grep -q "RESULT.*is true" http_sig_result.txt; then
-            echo -e "\033[0;31mHTTP signatures proof FAILED\033[0m"
-            exit 1
-          fi
-          echo -e "\033[0;32mHTTP signatures proof VERIFIED\033[0m"
-
-          echo "Verifying concurrency proof..."
-          proverif pkd_concurrency.pv | tee concurrency_result.txt
-          if ! grep -q "RESULT.*is true" concurrency_result.txt; then
-            echo -e "\033[0;31mConcurrency proof FAILED\033[0m"
-            exit 1
-          fi
-          echo -e "\033[0;32mConcurrency proof VERIFIED\033[0m"
-
-          echo "Verifying composed threats proof..."
-          proverif pkd_composed_threats.pv | tee composed_result.txt
-          if ! grep -q "RESULT.*is true" composed_result.txt; then
-            echo -e "\033[0;31mComposed threats proof FAILED\033[0m"
-            exit 1
-          fi
-          echo -e "\033[0;32mComposed threats proof VERIFIED\033[0m"
-
-          echo ""
-          echo -e "\033[0;32mAll ProVerif proofs VERIFIED successfully\033[0m"
+      - name: Verify all ProVerif proofs
+        run: ./scripts/verify-proofs.sh proofs
 
       - name: Copy specification to traceability directory
         run: |
@@ -244,6 +99,7 @@ jobs:
           mkdir -p .duvet/specifications/www.rfc-editor.org/rfc/
           curl -sS -o .duvet/specifications/www.rfc-editor.org/rfc/rfc9162.txt https://www.rfc-editor.org/rfc/rfc9162.txt
           duvet report
+
       - name: Check duvet report generated
         run: |
           if [ ! -f traceability-report/index.html ]; then
@@ -251,3 +107,13 @@ jobs:
             exit 1
           fi
           echo -e "\033[0;32mDuvet traceability report generated successfully\033[0m"
+
+      - name: Check duvet snapshot is up-to-date
+        run: |
+          if ! git diff --exit-code .duvet/snapshot.txt; then
+            echo ""
+            echo -e "\033[0;31mDuvet snapshot is stale.\033[0m"
+            echo "Run 'duvet report' with all implementation repos present and commit the updated snapshot."
+            exit 1
+          fi
+          echo -e "\033[0;32mDuvet snapshot is up-to-date\033[0m"

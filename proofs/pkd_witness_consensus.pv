@@ -9,24 +9,33 @@
 
 (* TYPE DECLARATIONS *)
 
-type pkd_id.                   (* PKD server identifier *)
-type witness_id.               (* Witness identifier *)
-type public_key.               (* Ed25519 public key *)
-type secret_key.               (* Ed25519 secret key *)
-type signature.                (* Ed25519 signature *)
-type merkle_root.              (* Merkle tree root hash *)
-type timestamp.                (* Unix timestamp *)
-type hostname.                 (* PKD hostname *)
-type message.                  (* Cosignature payload *)
+type pkd_id.
+type witness_id.
+type public_key.
+type secret_key.
+type signature.
+type merkle_root.
+type timestamp.
+type hostname.
 
 (* CHANNELS *)
 
-free c: channel.               (* Public network channel *)
-free witness_channel: channel. (* PKD-to-witness channel *)
+free c: channel.
+free witness_channel: channel.
 
 (* CONSTANTS *)
 
-const COSIGN_CONTEXT: bitstring. (* "fedi-e2ee-v1:cosignature" *)
+const COSIGN_CONTEXT: bitstring.   (* "fedi-e2ee-v1:cosignature" *)
+
+(* PAE key-name constants matching spec's 8-piece structure:
+   "!pkd-context" : "fedi-e2ee-v1:cosignature"
+   "current-time" : <timestamp>
+   "hostname"     : <hostname>
+   "merkle-root"  : <merkle-root> *)
+const PAE_KEY_CONTEXT: bitstring.  (* "!pkd-context" *)
+const PAE_KEY_TIME: bitstring.     (* "current-time" *)
+const PAE_KEY_HOSTNAME: bitstring. (* "hostname" *)
+const PAE_KEY_ROOT: bitstring.     (* "merkle-root" *)
 
 (* CRYPTOGRAPHIC FUNCTIONS *)
 
@@ -35,17 +44,22 @@ fun sign(bitstring, secret_key): signature.
 reduc forall m: bitstring, sk: secret_key;
   verify_sig(m, sign(m, sk), pk(sk)) = true.
 
-(* PAE-encoded cosignature payload *)
-fun cosign_pae(bitstring, timestamp, hostname, merkle_root): bitstring [data].
+(* 8-piece PAE: 4 key-value pairs *)
+fun cosign_pae(
+  bitstring, bitstring,
+  bitstring, timestamp,
+  bitstring, hostname,
+  bitstring, merkle_root
+): bitstring [data].
 
-(* TABLES FOR STATE TRACKING *)
+(* TABLES *)
 
 table witness_keys(witness_id, public_key).
 table cosignatures(witness_id, merkle_root, timestamp).
 table pkd_roots(pkd_id, merkle_root, timestamp).
 table pkd_hostnames(pkd_id, hostname).
 
-(* EVENTS FOR SECURITY PROPERTIES *)
+(* EVENTS *)
 
 event CosignatureReceived(witness_id, merkle_root, hostname).
 event CosignatureAccepted(witness_id, merkle_root, hostname).
@@ -60,64 +74,53 @@ event PKDPublishedRoot(pkd_id, merkle_root).
 
 (* SECURITY QUERIES *)
 
-(* --- Query 1: Cosignature Requires Known Witness ---
-   Only registered witnesses can produce accepted cosignatures *)
-query wid: witness_id, root: merkle_root, host: hostname,
-      wpk: public_key;
+query wid: witness_id, root: merkle_root,
+      host: hostname, wpk: public_key;
   event(CosignatureAccepted(wid, root, host)) ==>
     event(WitnessVerified(wid, wpk)).
 
-(* --- Query 2: Cosignature Requires Valid Hostname ---
-   Accepted cosignatures must have the correct hostname *)
-query wid: witness_id, root: merkle_root, host: hostname;
+query wid: witness_id, root: merkle_root,
+      host: hostname;
   event(CosignatureAccepted(wid, root, host)) ==>
     event(HostnameValidated(host)).
 
-(* --- Query 3: Split-View Detection ---
-   If PKD presents root1 to witness A and root2 to witness B,
-   and both cosign, clients can detect the inconsistency *)
-query pkd: pkd_id, root1: merkle_root, root2: merkle_root;
+query pkd: pkd_id, root1: merkle_root,
+      root2: merkle_root;
   event(SplitViewDetected(pkd, root1, root2)).
 
-(* --- Query 4: Witness Secret Key Secrecy ---
-   Honest witness secret keys remain confidential *)
 free honest_witness_sk: secret_key [private].
 query attacker(honest_witness_sk).
 
-(* --- Query 5: Quorum Reachability ---
-   The quorum mechanism is reachable (2-of-N threshold works).
-   Note: The table-based quorum check (distinct witness keys via
-   wpk1 <> wpk2) cannot be fully verified by ProVerif's
-   approximation of tables. The correctness of the 2-of-N
-   threshold is enforced by the process logic. *)
 query root: merkle_root, host: hostname;
   event(QuorumReached(root, host)) ==> true.
 
 (* PKD COSIGNATURE VERIFICATION *)
 
-let PKD_VerifyCosignature(own_id: pkd_id, own_host: hostname) =
+let PKD_VerifyCosignature(
+  own_id: pkd_id, own_host: hostname
+) =
   in(c, (wid: witness_id, root: merkle_root,
          ts: timestamp, host: hostname,
          wpk: public_key, sig: signature));
 
   event CosignatureReceived(wid, root, host);
 
-  (* REQUIREMENT 1: Witness must be registered *)
   get witness_keys(=wid, =wpk) in
   event WitnessVerified(wid, wpk);
 
-  (* REQUIREMENT 2: Verify hostname matches this PKD *)
   if host = own_host then
   event HostnameValidated(host);
 
-  (* REQUIREMENT 3: Verify root is one of our published roots *)
   get pkd_roots(=own_id, =root, root_ts) in
 
-  (* REQUIREMENT 4: Verify cosignature *)
-  let payload = cosign_pae(COSIGN_CONTEXT, ts, host, root) in
+  let payload = cosign_pae(
+    PAE_KEY_CONTEXT, COSIGN_CONTEXT,
+    PAE_KEY_TIME, ts,
+    PAE_KEY_HOSTNAME, host,
+    PAE_KEY_ROOT, root
+  ) in
   if verify_sig(payload, sig, wpk) = true then
 
-  (* Accept and store cosignature *)
   insert cosignatures(wid, root, ts);
   event CosignatureAccepted(wid, root, host);
   out(c, (wid, root, true))
@@ -132,11 +135,8 @@ let PKD_VerifyCosignature(own_id: pkd_id, own_host: hostname) =
 let Client_CheckQuorum(own_host: hostname) =
   in(c, (root: merkle_root));
 
-  (* Get cosignatures from two different witnesses *)
   get cosignatures(wid1, =root, ts1) in
   get cosignatures(wid2, =root, ts2) in
-
-  (* Require different witnesses (2-of-N threshold) *)
   get witness_keys(=wid1, wpk1) in
   get witness_keys(=wid2, wpk2) in
 
@@ -144,35 +144,37 @@ let Client_CheckQuorum(own_host: hostname) =
     event QuorumReached(root, own_host);
     out(c, (root, true)).
 
-(* WITNESS COSIGNING PROCESS *)
+(* WITNESS COSIGNING *)
 
-let Witness_Cosign(wid: witness_id, wsk: secret_key,
-                   pkd_host: hostname) =
+let Witness_Cosign(
+  wid: witness_id, wsk: secret_key,
+  pkd_host: hostname
+) =
   let wpk = pk(wsk) in
-
   in(c, (root: merkle_root, ts: timestamp));
 
-  (* Witness validates the transparency log *)
   event WitnessValidatedLog(wid, root);
 
-  (* Create cosignature *)
-  let payload = cosign_pae(COSIGN_CONTEXT, ts, pkd_host, root) in
+  let payload = cosign_pae(
+    PAE_KEY_CONTEXT, COSIGN_CONTEXT,
+    PAE_KEY_TIME, ts,
+    PAE_KEY_HOSTNAME, pkd_host,
+    PAE_KEY_ROOT, root
+  ) in
   let sig = sign(payload, wsk) in
 
   out(c, (wid, root, ts, pkd_host, wpk, sig)).
 
-(* SPLIT VIEW DETECTION: Client queries multiple witnesses *)
+(* SPLIT VIEW DETECTION *)
 
 let Client_DetectSplitView(pkd: pkd_id) =
-  (* Get two cosignatures from different witnesses *)
   get cosignatures(wid1, root1, ts1) in
   get cosignatures(wid2, root2, ts2) in
-
-  (* If roots differ for same PKD, split view detected *)
   if root1 <> root2 then
     event SplitViewDetected(pkd, root1, root2).
 
-(* ATTACKER: Fake witness tries to cosign *)
+(* ATTACKER *)
+
 let AttackerFakeWitness(target_host: hostname) =
   new fake_wid: witness_id;
   new fake_sk: secret_key;
@@ -180,31 +182,30 @@ let AttackerFakeWitness(target_host: hostname) =
   new fake_root: merkle_root;
   new ts: timestamp;
 
-  let payload = cosign_pae(COSIGN_CONTEXT, ts,
-                           target_host, fake_root) in
+  let payload = cosign_pae(
+    PAE_KEY_CONTEXT, COSIGN_CONTEXT,
+    PAE_KEY_TIME, ts,
+    PAE_KEY_HOSTNAME, target_host,
+    PAE_KEY_ROOT, fake_root
+  ) in
   let sig = sign(payload, fake_sk) in
-  out(c, (fake_wid, fake_root, ts, target_host, fake_pk, sig)).
+  out(c, (fake_wid, fake_root, ts, target_host,
+          fake_pk, sig)).
 
-(* ATTACKER: Colluding PKD presents different roots *)
 let AttackerSplitView(pkd: pkd_id) =
   new root_a: merkle_root;
   new root_b: merkle_root;
   new ts: timestamp;
-
-  (* Present root_a to witness 1 *)
   out(c, (root_a, ts));
-  (* Present root_b to witness 2 *)
   out(c, (root_b, ts)).
 
 (* MAIN PROCESS *)
 
 process
-  (* PKD *)
   new pkd1_id: pkd_id;
   new pkd1_host: hostname;
   insert pkd_hostnames(pkd1_id, pkd1_host);
 
-  (* Honest witnesses (need at least 2 for quorum) *)
   new witness1_id: witness_id;
   new witness1_sk: secret_key;
   let witness1_pk = pk(witness1_sk) in
@@ -215,13 +216,11 @@ process
   let witness2_pk = pk(witness2_sk) in
   insert witness_keys(witness2_id, witness2_pk);
 
-  (* Published roots *)
   new root1: merkle_root;
   new ts1: timestamp;
   insert pkd_roots(pkd1_id, root1, ts1);
   event PKDPublishedRoot(pkd1_id, root1);
 
-  (* Public information *)
   out(c, pkd1_id);
   out(c, pkd1_host);
   out(c, witness1_id);
@@ -231,18 +230,11 @@ process
   out(c, root1);
 
   (
-    (* PKD processes *)
     !PKD_VerifyCosignature(pkd1_id, pkd1_host) |
-
-    (* Client processes *)
     !Client_CheckQuorum(pkd1_host) |
     !Client_DetectSplitView(pkd1_id) |
-
-    (* Honest witnesses cosign *)
     !Witness_Cosign(witness1_id, witness1_sk, pkd1_host) |
     !Witness_Cosign(witness2_id, witness2_sk, pkd1_host) |
-
-    (* Attacker scenarios *)
     !AttackerFakeWitness(pkd1_host) |
     !AttackerSplitView(pkd1_id)
   )

@@ -1,4 +1,5 @@
 /.idea
+/proofs/*.txt
 /traceability-report
 .duvet/requirements/
 .duvet/specifications/
