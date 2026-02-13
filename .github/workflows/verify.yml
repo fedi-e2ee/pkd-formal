@@ -75,6 +75,9 @@ jobs:
         if: steps.cache-duvet.outputs.cache-hit != 'true'
         run: cargo install duvet --version 0.4.1 --locked
 
+      - name: Make scripts executable
+        run: chmod +x ./scripts/verify-proofs.sh
+
       - name: Verify all ProVerif proofs
         run: ./scripts/verify-proofs.sh proofs
 
