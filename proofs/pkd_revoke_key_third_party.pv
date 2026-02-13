@@ -9,6 +9,9 @@ type secret_key.               (* Ed25519 secret key *)
 type signature.                (* Ed25519 signature *)
 type revocation_token.         (* Revocation token = base64url(payload || sig) *)
 type message.                  (* Protocol messages *)
+type aux_type.                 (* Auxiliary data extension type *)
+type aux_id.                   (* Auxiliary data identifier *)
+type aux_data.                 (* Auxiliary data content *)
 
 (* CHANNELS *)
 
@@ -17,6 +20,7 @@ free pkd_internal: channel [private].  (* Internal PKD state *)
 
 (* CONSTANTS *)
 
+(* Spec: token = "FediPKD1" || (0xFE*32 || "revoke-public-key") || pk *)
 const REVOCATION_PREFIX: bitstring.    (* "FediPKD1" *)
 const REVOCATION_CONSTANT: bitstring.  (* 0xFE * 32 || "revoke-public-key" *)
 
@@ -28,26 +32,50 @@ fun sign(bitstring, secret_key): signature.
 reduc forall m: bitstring, sk: secret_key;
   verify(m, sign(m, sk), pk(sk)) = true.
 
-(* --- Revocation Token Construction --- *)
-(* Token payload = REVOCATION_PREFIX || REVOCATION_CONSTANT || public_key *)
-fun make_token_payload(public_key): bitstring.
+(* --- Revocation Token Construction ---
+   Token payload = REVOCATION_PREFIX || REVOCATION_CONSTANT || public_key
+   Now explicitly binds the spec constants into the payload *)
+fun make_token_payload(
+  bitstring, bitstring, public_key
+): bitstring.
 
 (* Token = payload || signature *)
-fun make_revocation_token(bitstring, signature): revocation_token [data].
+fun make_revocation_token(
+  bitstring, signature
+): revocation_token [data].
 
 (* Parse revocation token *)
 reduc forall payload: bitstring, sig: signature;
-  parse_token(make_revocation_token(payload, sig)) = (payload, sig).
+  parse_token(make_revocation_token(payload, sig)) =
+    (payload, sig).
 
 (* Extract public key from token payload *)
-reduc forall pk_val: public_key;
-  extract_pk(make_token_payload(pk_val)) = pk_val.
+reduc forall prefix: bitstring, constant: bitstring,
+      pk_val: public_key;
+  extract_pk(
+    make_token_payload(prefix, constant, pk_val)
+  ) = pk_val.
+
+(* Extract and verify token format fields *)
+reduc forall prefix: bitstring, constant: bitstring,
+      pk_val: public_key;
+  extract_prefix(
+    make_token_payload(prefix, constant, pk_val)
+  ) = prefix.
+
+reduc forall prefix: bitstring, constant: bitstring,
+      pk_val: public_key;
+  extract_constant(
+    make_token_payload(prefix, constant, pk_val)
+  ) = constant.
 
 (* TABLES FOR STATE TRACKING *)
 
 table registered_keys(actor_id, public_key).
 table revoked_keys(actor_id, public_key).
 table fireproof_actors(actor_id).
+table auxiliary_data(actor_id, aux_type, aux_id, aux_data).
+table revoked_aux_data(actor_id, aux_id).
 
 (* EVENTS FOR SECURITY PROPERTIES *)
 
@@ -56,52 +84,81 @@ event TokenUsed(actor_id, public_key, revocation_token).
 event KeyRevokedByToken(actor_id, public_key).
 event FireproofBypassed(actor_id, public_key).
 event HonestKeyRevoked(actor_id, public_key).
+event TokenFormatVerified(public_key).
+event LastKeyRevoked(actor_id, public_key).
+event AuxDataRevokedOnLastKey(actor_id).
 
 (* SECURITY QUERIES *)
 
-(* --- Query 1: Only Key Holder Can Generate Valid Token ---
-   Attacker cannot create valid revocation token for honest key *)
+(* --- Query 1: Only Key Holder Can Generate Valid Token --- *)
 free honest_token: revocation_token [private].
 query attacker(honest_token).
 
-(* --- Query 2: Token Binding to Public Key ---
-   If a token generated for pk1 is used, the revoked key must be pk1 *)
-query pk1: public_key, token: revocation_token, actor: actor_id;
-  event(TokenUsed(actor, pk1, token)) ==> event(TokenGenerated(pk1, token)).
+(* --- Query 2: Token Binding to Public Key --- *)
+query pk1: public_key, token: revocation_token,
+      actor: actor_id;
+  event(TokenUsed(actor, pk1, token)) ==>
+    event(TokenGenerated(pk1, token)).
 
-(* --- Query 3: Fireproof Bypass is Controlled ---
-   If Fireproof actor has key revoked, it must be via valid token *)
+(* --- Query 3: Fireproof Bypass is Controlled --- *)
 query actor: actor_id, pk_val: public_key;
-  event(FireproofBypassed(actor, pk_val)) ==> event(KeyRevokedByToken(actor, pk_val)).
+  event(FireproofBypassed(actor, pk_val)) ==>
+    event(KeyRevokedByToken(actor, pk_val)).
 
-(* --- Query 4: Token Authentication ---
-   If token is used to revoke a key, that token was legitimately generated *)
-query actor: actor_id, pk_val: public_key, token: revocation_token;
-  event(TokenUsed(actor, pk_val, token)) ==> event(TokenGenerated(pk_val, token)).
+(* --- Query 4: Token Authentication --- *)
+query actor: actor_id, pk_val: public_key,
+      token: revocation_token;
+  event(TokenUsed(actor, pk_val, token)) ==>
+    event(TokenGenerated(pk_val, token)).
+
+(* --- Query 5: Token Format Verified ---
+   Accepted tokens must have correct prefix and constant *)
+query actor: actor_id, pk_val: public_key,
+      token: revocation_token;
+  event(TokenUsed(actor, pk_val, token)) ==>
+    event(TokenFormatVerified(pk_val)).
+
+(* --- Query 6: Last Key Cascade ---
+   If RevokeKeyThirdParty revokes last key, aux data is also
+   revoked (BurnDown-equivalent behavior) *)
+query actor: actor_id, pk_val: public_key;
+  event(LastKeyRevoked(actor, pk_val)) ==>
+    event(AuxDataRevokedOnLastKey(actor)).
+
+(* --- Query 7: Honest Secret Key Secrecy --- *)
+free honest_sk_val: secret_key [private].
+query attacker(honest_sk_val).
 
 (* REVOCATION TOKEN GENERATION *)
 
-(* Honest actor generates revocation token for their own key *)
 let GenerateRevocationToken(sk: secret_key) =
   let pk_val = pk(sk) in
-  (* Construct token payload: PREFIX || CONSTANT || pk *)
-  let payload = make_token_payload(pk_val) in
-  (* Sign the payload *)
+  let payload = make_token_payload(
+    REVOCATION_PREFIX, REVOCATION_CONSTANT, pk_val
+  ) in
   let sig = sign(payload, sk) in
-  (* Create token *)
   let token = make_revocation_token(payload, sig) in
   event TokenGenerated(pk_val, token);
-  (* Output token (could be stored offline or given to third party) *)
   out(c, token).
 
 (* PKD REVOKE_KEY_THIRD_PARTY PROCESSING *)
 
-(* PKD receives RevokeKeyThirdParty message with token and processes it *)
 let PKD_ProcessRevokeKeyThirdParty =
-  in(c, (actor: actor_id, revoke_pk: public_key, token: revocation_token, third_party_actor: actor_id));
+  in(c, (actor: actor_id, revoke_pk: public_key,
+         token: revocation_token,
+         third_party_actor: actor_id));
 
   (* Parse token *)
-  let (payload: bitstring, sig: signature) = parse_token(token) in
+  let (payload: bitstring, sig: signature) =
+    parse_token(token) in
+
+  (* Verify token format: prefix must be "FediPKD1" *)
+  let prefix = extract_prefix(payload) in
+  if prefix = REVOCATION_PREFIX then
+
+  (* Verify token format: constant must match spec *)
+  let constant = extract_constant(payload) in
+  if constant = REVOCATION_CONSTANT then
 
   (* Extract public key from payload *)
   let pk_from_token = extract_pk(payload) in
@@ -111,123 +168,178 @@ let PKD_ProcessRevokeKeyThirdParty =
 
   (* Verify signature on token *)
   if verify(payload, sig, revoke_pk) = true then
+  event TokenFormatVerified(revoke_pk);
 
   (* Check: key must be registered for this actor *)
   get registered_keys(=actor, =revoke_pk) in
     event TokenUsed(actor, revoke_pk, token);
-    (* Revoke the key *)
     insert revoked_keys(actor, revoke_pk);
     event KeyRevokedByToken(actor, revoke_pk);
 
-    (* Check if actor is Fireproof (for logging purposes) *)
+    (* Check if actor is Fireproof *)
     get fireproof_actors(=actor) in
-      (* Fireproof, but RevokeKeyThirdParty bypasses it *)
       event FireproofBypassed(actor, revoke_pk);
-      out(c, (actor, revoke_pk))
+
+      (* Check remaining keys *)
+      get registered_keys(=actor, remaining_pk) in
+        out(c, (actor, revoke_pk))
+      else
+        (* Last key: cascade to BurnDown equivalent *)
+        get auxiliary_data(=actor, atype, aid, adata) in
+          insert revoked_aux_data(actor, aid);
+          event AuxDataRevokedOnLastKey(actor);
+          event LastKeyRevoked(actor, revoke_pk);
+          out(c, (actor, revoke_pk))
+        else
+          event AuxDataRevokedOnLastKey(actor);
+          event LastKeyRevoked(actor, revoke_pk);
+          out(c, (actor, revoke_pk))
     else
-      (* Not Fireproof, proceed normally *)
-      out(c, (actor, revoke_pk))
+      (* Not Fireproof *)
+      get registered_keys(=actor, remaining_pk) in
+        out(c, (actor, revoke_pk))
+      else
+        get auxiliary_data(=actor, atype, aid, adata) in
+          insert revoked_aux_data(actor, aid);
+          event AuxDataRevokedOnLastKey(actor);
+          event LastKeyRevoked(actor, revoke_pk);
+          out(c, (actor, revoke_pk))
+        else
+          event AuxDataRevokedOnLastKey(actor);
+          event LastKeyRevoked(actor, revoke_pk);
+          out(c, (actor, revoke_pk))
   else
     0  (* Key not registered *)
   else
     0  (* Signature verification failed *)
   else
-    0. (* Public key mismatch *)
+    0  (* Public key mismatch *)
+  else
+    0  (* Wrong REVOCATION_CONSTANT *)
+  else
+    0. (* Wrong REVOCATION_PREFIX *)
 
 (* HONEST ACTOR SCENARIOS *)
 
-(* Honest actor generates token and stores it *)
 let HonestActor(actor: actor_id, sk: secret_key) =
   let pk_val = pk(sk) in
-  (* Register key *)
   insert registered_keys(actor, pk_val);
   out(c, (actor, pk_val));
 
-  (* Generate revocation token *)
-  let payload = make_token_payload(pk_val) in
+  let payload = make_token_payload(
+    REVOCATION_PREFIX, REVOCATION_CONSTANT, pk_val
+  ) in
   let sig = sign(payload, sk) in
   let token = make_revocation_token(payload, sig) in
   event TokenGenerated(pk_val, token);
-
-  (* Store token as "honest_token" for secrecy query *)
   out(pkd_internal, token).
 
-(* Honest Fireproof actor *)
-let HonestFireproofActor(actor: actor_id, sk: secret_key) =
+let HonestFireproofActor(
+  actor: actor_id, sk: secret_key
+) =
   let pk_val = pk(sk) in
   insert registered_keys(actor, pk_val);
   insert fireproof_actors(actor);
   out(c, (actor, pk_val));
 
-  (* Generate revocation token *)
-  let payload = make_token_payload(pk_val) in
+  let payload = make_token_payload(
+    REVOCATION_PREFIX, REVOCATION_CONSTANT, pk_val
+  ) in
   let sig = sign(payload, sk) in
   let token = make_revocation_token(payload, sig) in
   event TokenGenerated(pk_val, token);
   out(c, token).
 
-(* Third party actor who possesses a revocation token *)
-let ThirdPartyWithToken(third_party: actor_id, target_actor: actor_id) =
-  (* Receive a revocation token (could be from honest actor or attacker) *)
+(* Actor with aux data for cascade testing *)
+let HonestActorWithAuxData(
+  actor: actor_id, sk: secret_key,
+  atype: aux_type, aid: aux_id, adata: aux_data
+) =
+  let pk_val = pk(sk) in
+  insert registered_keys(actor, pk_val);
+  insert auxiliary_data(actor, atype, aid, adata);
+  out(c, (actor, pk_val));
+
+  let payload = make_token_payload(
+    REVOCATION_PREFIX, REVOCATION_CONSTANT, pk_val
+  ) in
+  let sig = sign(payload, sk) in
+  let token = make_revocation_token(payload, sig) in
+  event TokenGenerated(pk_val, token);
+  out(c, token).
+
+let ThirdPartyWithToken(
+  third_party: actor_id, target_actor: actor_id
+) =
   in(c, token: revocation_token);
   in(c, revoke_pk: public_key);
-  (* Submit RevokeKeyThirdParty *)
   out(c, (target_actor, revoke_pk, token, third_party)).
 
 (* ATTACKER SCENARIOS *)
 
-(* Attacker tries to forge revocation token for honest key *)
 let AttackerForgeToken(honest_pk: public_key) =
-  (* Attacker knows honest public key *)
   in(c, target_pk: public_key);
   new attacker_sk: secret_key;
-
-  (* Try to create token for honest key *)
-  let payload = make_token_payload(target_pk) in
+  let payload = make_token_payload(
+    REVOCATION_PREFIX, REVOCATION_CONSTANT, target_pk
+  ) in
   let fake_sig = sign(payload, attacker_sk) in
-  let fake_token = make_revocation_token(payload, fake_sig) in
+  let fake_token = make_revocation_token(
+    payload, fake_sig
+  ) in
+  out(c, fake_token).
 
-  (* Try to use it *)
+let AttackerWrongPrefix(target_pk: public_key) =
+  new attacker_sk: secret_key;
+  new wrong_prefix: bitstring;
+  let payload = make_token_payload(
+    wrong_prefix, REVOCATION_CONSTANT, target_pk
+  ) in
+  let fake_sig = sign(payload, attacker_sk) in
+  let fake_token = make_revocation_token(
+    payload, fake_sig
+  ) in
   out(c, fake_token).
 
 (* MAIN PROCESS *)
 
 process
-  (* Generate honest actor and their secret key *)
   new honest_actor_id: actor_id;
   new honest_sk: secret_key;
   let honest_pk = pk(honest_sk) in
 
-  (* Generate Fireproof actor *)
   new fireproof_actor_id: actor_id;
   new fireproof_sk: secret_key;
 
-  (* Generate third party actor *)
+  new auxdata_actor_id: actor_id;
+  new auxdata_sk: secret_key;
+  new test_aux_type: aux_type;
+  new test_aux_id: aux_id;
+  new test_aux_data: aux_data;
+
   new third_party_id: actor_id;
 
-  (* Generate attacker's key *)
   new attacker_sk: secret_key;
   let attacker_pk = pk(attacker_sk) in
   out(c, attacker_pk);
-  out(c, attacker_sk);  (* Attacker controls their own key *)
+  out(c, attacker_sk);
 
-  (* Make honest actor ID public *)
   out(c, honest_actor_id);
   out(c, honest_pk);
+  out(c, auxdata_actor_id);
 
   (
-    (* PKD server process *)
     !PKD_ProcessRevokeKeyThirdParty |
-
-    (* Honest actor generates token *)
     HonestActor(honest_actor_id, honest_sk) |
-
-    (* Honest Fireproof actor *)
-    HonestFireproofActor(fireproof_actor_id, fireproof_sk) |
-
-    (* Third parties can submit tokens *)
-    !ThirdPartyWithToken(third_party_id, honest_actor_id) |
-
-    (* Attacker tries to forge tokens *)
-    !AttackerForgeToken(honest_pk)
+    HonestFireproofActor(
+      fireproof_actor_id, fireproof_sk) |
+    HonestActorWithAuxData(
+      auxdata_actor_id, auxdata_sk,
+      test_aux_type, test_aux_id, test_aux_data) |
+    !ThirdPartyWithToken(
+      third_party_id, honest_actor_id) |
+    !ThirdPartyWithToken(
+      third_party_id, auxdata_actor_id) |
+    !AttackerForgeToken(honest_pk) |
+    !AttackerWrongPrefix(honest_pk)
   )

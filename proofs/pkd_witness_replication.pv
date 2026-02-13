@@ -1,0 +1,448 @@
+(*= https://raw.githubusercontent.com/fedi-e2ee/public-key-directory-specification/refs/heads/main/Specification.md#passive-gossip-mirroring *)
+(*# Passive gossip: third-party software streams Protocol Messages from a source PKD. *)
+
+(*= https://raw.githubusercontent.com/fedi-e2ee/public-key-directory-specification/refs/heads/main/Specification.md#witness-co-signing *)
+(*# Replica instances SHOULD provide witness co-signatures to the transparency log. *)
+
+(*= https://raw.githubusercontent.com/fedi-e2ee/public-key-directory-specification/refs/heads/main/Specification.md#revokekeythirdparty-validation-steps *)
+(*# RevokeKeyThirdParty revocation tokens MUST have their signature verified. *)
+
+(* ============================================================
+   TYPE DECLARATIONS
+   ============================================================ *)
+
+type pkd_id.              (* PKD server identifier *)
+type mirror_id.           (* Mirror/replica identifier *)
+type actor_id.            (* Actor identifier *)
+type public_key.          (* Ed25519 public key *)
+type secret_key.          (* Ed25519 secret key *)
+type signature.           (* Ed25519 signature *)
+type merkle_root.         (* Merkle tree root hash *)
+type timestamp.           (* Unix timestamp *)
+type record_hash.         (* Hash of a protocol message record *)
+
+(* ============================================================
+   CHANNELS
+   ============================================================ *)
+
+free c: channel.                       (* Public network *)
+free replication_channel: channel.     (* PKD-to-mirror *)
+
+(* ============================================================
+   CONSTANTS
+   ============================================================ *)
+
+const REVOCATION_PREFIX: bitstring.    (* "FediPKD1" *)
+const REVOCATION_CONSTANT: bitstring.  (* 0xFE * 32 || "revoke-public-key" *)
+const COSIGN_CONTEXT: bitstring.       (* "fedi-e2ee-v1:cosignature" *)
+
+(* PAE key-name constants for 8-piece cosignature structure *)
+const PAE_KEY_CONTEXT: bitstring.  (* "!pkd-context" *)
+const PAE_KEY_TIME: bitstring.     (* "current-time" *)
+const PAE_KEY_HOSTNAME: bitstring. (* "hostname" *)
+const PAE_KEY_ROOT: bitstring.     (* "merkle-root" *)
+
+(* ============================================================
+   CRYPTOGRAPHIC FUNCTIONS
+   ============================================================ *)
+
+fun pk(secret_key): public_key.
+fun sign(bitstring, secret_key): signature.
+reduc forall m: bitstring, sk: secret_key;
+  verify_sig(m, sign(m, sk), pk(sk)) = true.
+
+(* Revocation token construction — binds prefix + constant *)
+fun make_token_payload(
+  bitstring, bitstring, public_key
+): bitstring.
+fun make_revocation_token(bitstring, signature): bitstring [data].
+
+reduc forall payload: bitstring, sig: signature;
+  parse_token(make_revocation_token(payload, sig)) =
+    (payload, sig).
+
+reduc forall prefix: bitstring, constant: bitstring,
+      pk_val: public_key;
+  extract_pk(
+    make_token_payload(prefix, constant, pk_val)
+  ) = pk_val.
+
+reduc forall prefix: bitstring, constant: bitstring,
+      pk_val: public_key;
+  extract_prefix(
+    make_token_payload(prefix, constant, pk_val)
+  ) = prefix.
+
+reduc forall prefix: bitstring, constant: bitstring,
+      pk_val: public_key;
+  extract_constant(
+    make_token_payload(prefix, constant, pk_val)
+  ) = constant.
+
+(* 8-piece cosignature PAE: 4 key-value pairs *)
+fun cosign_pae(
+  bitstring, bitstring,
+  bitstring, timestamp,
+  bitstring, bitstring,
+  bitstring, merkle_root
+): bitstring [data].
+
+(* Protocol message with record hash *)
+fun record_of(
+  actor_id, bitstring, signature, merkle_root
+): record_hash [data].
+
+(* Action constants for message types *)
+const ACTION_REVOKE_THIRD_PARTY: bitstring.
+const ACTION_ADD_KEY: bitstring.
+
+(* ============================================================
+   TABLES
+   ============================================================ *)
+
+(* Source PKD state *)
+table registered_keys(pkd_id, actor_id, public_key).
+table published_records(pkd_id, record_hash).
+table pkd_roots(pkd_id, merkle_root, timestamp).
+table pkd_hostnames(pkd_id, bitstring).
+
+(* Witness state *)
+table witness_keys(pkd_id, public_key).
+table cosignatures(pkd_id, merkle_root, timestamp, signature).
+
+(* Mirror state *)
+table replicated_records(mirror_id, record_hash).
+table mirror_registered_keys(mirror_id, actor_id, public_key).
+table mirror_revoked_keys(mirror_id, actor_id, public_key).
+
+(* ============================================================
+   EVENTS
+   ============================================================ *)
+
+(* Source PKD events *)
+event RecordPublished(pkd_id, record_hash).
+event RevocationAccepted(pkd_id, actor_id, public_key).
+event RevocationTokenVerified(pkd_id, actor_id, public_key).
+
+(* Mirror replication events *)
+event RecordReplicated(mirror_id, record_hash).
+event ReplicatedRevocationVerified(mirror_id, actor_id, public_key).
+event ReplicatedRevocationAccepted(mirror_id, actor_id, public_key).
+event ReplicatedRevocationUnverified(mirror_id, actor_id, public_key).
+
+(* Witness events *)
+event WitnessValidatedLog(pkd_id, merkle_root).
+event CosignatureCreated(pkd_id, merkle_root).
+event CosignatureAcceptedForReplication(
+  mirror_id, pkd_id, merkle_root
+).
+
+(* Attack detection events *)
+event ForgedTokenReplicated(mirror_id, actor_id, public_key).
+event UnvalidatedRecordAccepted(mirror_id, record_hash).
+
+(* ============================================================
+   SECURITY QUERIES
+   ============================================================ *)
+
+(* Query 1: Replicated revocation requires token verification.
+   A mirror that accepts a replicated RevokeKeyThirdParty must
+   have verified the revocation token signature. *)
+query mid: mirror_id, actor: actor_id, key: public_key;
+  event(ReplicatedRevocationAccepted(mid, actor, key)) ==>
+    event(ReplicatedRevocationVerified(mid, actor, key)).
+
+(* Query 2: Honest key secrecy preserved through replication.
+   Replication of revocation tokens does not leak secret keys.
+   Even though valid tokens contain signatures, they do not
+   reveal the signing key itself. *)
+free honest_mirror_sk: secret_key [private].
+query attacker(honest_mirror_sk).
+
+(* Query 3: Cosignature required before replication acceptance.
+   Records replicated to a mirror should have a cosignature
+   from a registered witness. *)
+query mid: mirror_id, pkd: pkd_id, root: merkle_root;
+  event(CosignatureAcceptedForReplication(mid, pkd, root)) ==>
+    event(WitnessValidatedLog(pkd, root)).
+
+(* Query 4: Source PKD revocation requires token verification.
+   The source PKD itself must verify revocation tokens. *)
+query pkd: pkd_id, actor: actor_id, key: public_key;
+  event(RevocationAccepted(pkd, actor, key)) ==>
+    event(RevocationTokenVerified(pkd, actor, key)).
+
+(* Query 5: Honest secret key secrecy *)
+free honest_actor_sk: secret_key [private].
+query attacker(honest_actor_sk).
+
+(* ============================================================
+   SOURCE PKD: Process RevokeKeyThirdParty
+   ============================================================ *)
+
+let SourcePKD_ProcessRevocation(
+  pkd: pkd_id, own_host: bitstring
+) =
+  in(c, (actor: actor_id, target_pk: public_key,
+         token_bytes: bitstring));
+
+  (* Parse revocation token *)
+  let (payload: bitstring, sig: signature) =
+    parse_token(token_bytes) in
+
+  (* Verify token format: prefix and constant *)
+  let prefix = extract_prefix(payload) in
+  if prefix = REVOCATION_PREFIX then
+  let constant = extract_constant(payload) in
+  if constant = REVOCATION_CONSTANT then
+
+  (* Extract public key from payload *)
+  let pk_from_token = extract_pk(payload) in
+
+  (* REQUIREMENT: Token pk must match target *)
+  if pk_from_token = target_pk then
+
+  (* REQUIREMENT: Verify signature on token *)
+  if verify_sig(payload, sig, target_pk) = true then
+  event RevocationTokenVerified(pkd, actor, target_pk);
+
+  (* REQUIREMENT: Key must be registered *)
+  get registered_keys(=pkd, =actor, =target_pk) in
+
+  (* Accept revocation *)
+  new accepted_root: merkle_root;
+  let rec_hash = record_of(
+    actor, ACTION_REVOKE_THIRD_PARTY, sig, accepted_root
+  ) in
+  insert published_records(pkd, rec_hash);
+  event RevocationAccepted(pkd, actor, target_pk);
+  event RecordPublished(pkd, rec_hash);
+  out(c, (actor, target_pk, token_bytes, rec_hash)).
+
+(* ============================================================
+   MIRROR: Replicate with token verification (CORRECT)
+   ============================================================ *)
+
+let Mirror_ReplicateWithVerification(mid: mirror_id) =
+  in(c, (actor: actor_id, target_pk: public_key,
+         token_bytes: bitstring, rec_hash: record_hash));
+
+  (* Parse revocation token *)
+  let (payload: bitstring, sig: signature) =
+    parse_token(token_bytes) in
+
+  (* Verify token format *)
+  let prefix = extract_prefix(payload) in
+  if prefix = REVOCATION_PREFIX then
+  let constant = extract_constant(payload) in
+  if constant = REVOCATION_CONSTANT then
+
+  (* Extract public key *)
+  let pk_from_token = extract_pk(payload) in
+
+  (* REQUIREMENT: Token pk must match target *)
+  if pk_from_token = target_pk then
+
+  (* REQUIREMENT: Verify signature on token *)
+  if verify_sig(payload, sig, target_pk) = true then
+  event ReplicatedRevocationVerified(mid, actor, target_pk);
+
+  (* Check key is registered on mirror *)
+  get mirror_registered_keys(=mid, =actor, =target_pk) in
+
+  (* Accept replicated revocation *)
+  insert replicated_records(mid, rec_hash);
+  insert mirror_revoked_keys(mid, actor, target_pk);
+  event ReplicatedRevocationAccepted(mid, actor, target_pk);
+  event RecordReplicated(mid, rec_hash);
+  out(c, (mid, actor, target_pk, true)).
+
+(* ============================================================
+   WITNESS: Validate log and cosign
+   ============================================================ *)
+
+let Witness_ValidateAndCosign(
+  wsk: secret_key, pkd: pkd_id, pkd_host: bitstring
+) =
+  let wpk = pk(wsk) in
+
+  in(c, (root: merkle_root, ts: timestamp));
+
+  (* Witness independently validates the transparency log *)
+  event WitnessValidatedLog(pkd, root);
+
+  (* Create cosignature *)
+  let payload = cosign_pae(
+    PAE_KEY_CONTEXT, COSIGN_CONTEXT,
+    PAE_KEY_TIME, ts,
+    PAE_KEY_HOSTNAME, pkd_host,
+    PAE_KEY_ROOT, root
+  ) in
+  let sig = sign(payload, wsk) in
+
+  event CosignatureCreated(pkd, root);
+  out(c, (pkd, root, ts, wpk, sig)).
+
+(* ============================================================
+   MIRROR: Verify cosignature before trusting replicated data
+   ============================================================ *)
+
+let Mirror_VerifyCosignature(
+  mid: mirror_id, source_pkd: pkd_id,
+  source_host: bitstring
+) =
+  in(c, (pkd: pkd_id, root: merkle_root,
+         ts: timestamp, wpk: public_key, sig: signature));
+
+  (* REQUIREMENT: Witness must be registered for source PKD *)
+  get witness_keys(=pkd, =wpk) in
+
+  (* REQUIREMENT: Verify cosignature *)
+  let payload = cosign_pae(
+    PAE_KEY_CONTEXT, COSIGN_CONTEXT,
+    PAE_KEY_TIME, ts,
+    PAE_KEY_HOSTNAME, source_host,
+    PAE_KEY_ROOT, root
+  ) in
+  if verify_sig(payload, sig, wpk) = true then
+
+  (* Store and accept cosignature *)
+  insert cosignatures(pkd, root, ts, sig);
+  event CosignatureAcceptedForReplication(mid, pkd, root);
+  out(c, (mid, pkd, root, true)).
+
+(* ============================================================
+   HONEST ACTOR: Generate revocation token
+   ============================================================ *)
+
+let HonestActor_GenerateToken(
+  actor: actor_id, sk: secret_key, pkd: pkd_id
+) =
+  let actor_pk = pk(sk) in
+
+  (* Register key on source PKD *)
+  insert registered_keys(pkd, actor, actor_pk);
+
+  (* Construct revocation token *)
+  let payload = make_token_payload(
+    REVOCATION_PREFIX, REVOCATION_CONSTANT, actor_pk
+  ) in
+  let sig = sign(payload, sk) in
+  let token = make_revocation_token(payload, sig) in
+
+  (* Output token (third party uses it) *)
+  out(c, (actor, actor_pk, token)).
+
+(* ============================================================
+   ATTACKER: Forge revocation token and inject via replication
+   ============================================================ *)
+
+let Attacker_ForgeAndReplicate(
+  target_actor: actor_id, target_pk: public_key,
+  target_mirror: mirror_id
+) =
+  new attacker_sk: secret_key;
+
+  (* Forge token: sign with attacker's key, not target's *)
+  let payload = make_token_payload(
+    REVOCATION_PREFIX, REVOCATION_CONSTANT, target_pk
+  ) in
+  let fake_sig = sign(payload, attacker_sk) in
+  let fake_token = make_revocation_token(payload, fake_sig) in
+
+  (* Create fake record hash *)
+  new fake_root: merkle_root;
+  let fake_hash = record_of(
+    target_actor, ACTION_REVOKE_THIRD_PARTY,
+    fake_sig, fake_root
+  ) in
+
+  event ForgedTokenReplicated(
+    target_mirror, target_actor, target_pk
+  );
+
+  (* Send forged revocation to mirror *)
+  out(c, (target_actor, target_pk, fake_token, fake_hash)).
+
+(* ============================================================
+   ATTACKER: Malicious peer PKD replays token without
+   re-verification (models VH-6: Witness skips verification)
+   ============================================================ *)
+
+let Attacker_MaliciousPeerRelay(target_mirror: mirror_id) =
+  (* Intercept legitimate revocation from source PKD *)
+  in(c, (actor: actor_id, target_pk: public_key,
+         token_bytes: bitstring, rec_hash: record_hash));
+
+  (* Modify actor or key but keep same token *)
+  new fake_actor: actor_id;
+
+  (* Relay with wrong actor binding *)
+  out(c, (fake_actor, target_pk, token_bytes, rec_hash)).
+
+(* ============================================================
+   MAIN PROCESS
+   ============================================================ *)
+
+process
+  (* Source PKD *)
+  new source_pkd: pkd_id;
+  new source_host: bitstring;
+  insert pkd_hostnames(source_pkd, source_host);
+
+  (* Honest actor *)
+  new honest_actor: actor_id;
+  new honest_sk: secret_key;
+  let honest_pk = pk(honest_sk) in
+
+  (* Witness *)
+  new witness_sk: secret_key;
+  let witness_pk = pk(witness_sk) in
+  insert witness_keys(source_pkd, witness_pk);
+
+  (* Mirror *)
+  new mirror1: mirror_id;
+  insert mirror_registered_keys(
+    mirror1, honest_actor, honest_pk
+  );
+
+  (* Merkle root *)
+  new root1: merkle_root;
+  new ts1: timestamp;
+  insert pkd_roots(source_pkd, root1, ts1);
+
+  (* Public information *)
+  out(c, source_pkd);
+  out(c, source_host);
+  out(c, honest_actor);
+  out(c, honest_pk);
+  out(c, witness_pk);
+  out(c, mirror1);
+  out(c, root1);
+
+  (
+    (* Source PKD processes *)
+    !SourcePKD_ProcessRevocation(source_pkd, source_host) |
+
+    (* Mirror processes (CORRECT: with verification) *)
+    !Mirror_ReplicateWithVerification(mirror1) |
+    !Mirror_VerifyCosignature(
+      mirror1, source_pkd, source_host
+    ) |
+
+    (* Witness processes *)
+    !Witness_ValidateAndCosign(
+      witness_sk, source_pkd, source_host
+    ) |
+
+    (* Honest actor generates token *)
+    HonestActor_GenerateToken(
+      honest_actor, honest_sk, source_pkd
+    ) |
+
+    (* Attacker scenarios *)
+    !Attacker_ForgeAndReplicate(
+      honest_actor, honest_pk, mirror1
+    ) |
+    !Attacker_MaliciousPeerRelay(mirror1)
+  )

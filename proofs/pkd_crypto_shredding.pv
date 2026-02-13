@@ -29,16 +29,52 @@ free pkd_internal: channel [private].  (* PKD internal state *)
 
 (* CRYPTOGRAPHIC FUNCTIONS *)
 
-(* Symmetric encryption / decryption *)
-fun encrypt(enc_key, plaintext, attribute_name,
-            merkle_root): ciphertext.
-reduc forall k: enc_key, p: plaintext,
-      a: attribute_name, m: merkle_root;
-  decrypt(k, encrypt(k, p, a, m), a, m) = p.
+(* --- Spec: HKDF-HMAC-SHA512 key derivation ---
+   Derives AES-CTR key and HMAC key from IKM *)
+type aes_key.                  (* AES-256-CTR key *)
+type hmac_key.                 (* HMAC-SHA512 key *)
+type mac_tag.                  (* HMAC tag *)
 
-(* Plaintext commitment (Argon2id-based) *)
-fun commit(plaintext, attribute_name, merkle_root): commitment.
-reduc forall p: plaintext, a: attribute_name, m: merkle_root;
+fun hkdf_aes(enc_key, attribute_name,
+  merkle_root): aes_key.
+fun hkdf_hmac(enc_key, attribute_name,
+  merkle_root): hmac_key.
+
+(* --- Spec: AES-256-CTR encryption --- *)
+fun aes_ctr_encrypt(
+  aes_key, plaintext
+): ciphertext.
+reduc forall k: aes_key, p: plaintext;
+  aes_ctr_decrypt(k, aes_ctr_encrypt(k, p)) = p.
+
+(* --- Spec: HMAC-SHA512 (Encrypt-then-MAC) ---
+   MAC covers ciphertext + attribute_name + merkle_root
+   for key commitment *)
+fun hmac_sha512(
+  hmac_key, ciphertext, attribute_name, merkle_root
+): mac_tag.
+reduc forall hk: hmac_key, ct: ciphertext,
+      a: attribute_name, m: merkle_root;
+  hmac_verify(
+    hk, ct, a, m,
+    hmac_sha512(hk, ct, a, m)
+  ) = true.
+
+(* --- Composed Encrypt-then-MAC ---
+   encrypt(ikm, pt, attr, root) =
+     let aes_k = hkdf_aes(ikm, attr, root) in
+     let hmac_k = hkdf_hmac(ikm, attr, root) in
+     let ct = aes_ctr_encrypt(aes_k, pt) in
+     let tag = hmac_sha512(hmac_k, ct, attr, root) in
+     (ct, tag)
+*)
+
+(* --- Plaintext commitment (Argon2id-based) --- *)
+fun commit(
+  plaintext, attribute_name, merkle_root
+): commitment.
+reduc forall p: plaintext, a: attribute_name,
+      m: merkle_root;
   verify_commit(commit(p, a, m), p, a, m) = true.
 
 (* HPKE key rewrapping for trusted mirrors *)
@@ -54,8 +90,12 @@ reduc forall sk: hpke_privkey, k: enc_key;
 (* TABLES FOR STATE TRACKING *)
 
 table stored_keys(pkd_id, attribute_name, enc_key).
-table stored_ciphertexts(pkd_id, attribute_name, ciphertext).
-table stored_commitments(pkd_id, attribute_name, commitment).
+table stored_ciphertexts(
+  pkd_id, attribute_name, ciphertext, mac_tag
+).
+table stored_commitments(
+  pkd_id, attribute_name, commitment
+).
 table wiped_attributes(pkd_id, attribute_name).
 table mirror_keys(mirror_id, attribute_name, hpke_ciphertext).
 table mirror_wipe_status(mirror_id, attribute_name).
@@ -103,23 +143,35 @@ query mid: mirror_id, attr: attribute_name;
 
 (* PKD ENCRYPTION PROCESS *)
 
-let PKD_EncryptAttribute(pkd: pkd_id, key: enc_key,
-                         attr: attribute_name, pt: plaintext,
-                         root: merkle_root) =
-  let ct = encrypt(key, pt, attr, root) in
+let PKD_EncryptAttribute(
+  pkd: pkd_id, key: enc_key,
+  attr: attribute_name, pt: plaintext,
+  root: merkle_root
+) =
+  (* HKDF: derive AES + HMAC keys from IKM *)
+  let aes_k = hkdf_aes(key, attr, root) in
+  let hmac_k = hkdf_hmac(key, attr, root) in
+
+  (* AES-256-CTR encrypt *)
+  let ct = aes_ctr_encrypt(aes_k, pt) in
+
+  (* Encrypt-then-MAC: HMAC-SHA512 over ciphertext *)
+  let tag = hmac_sha512(hmac_k, ct, attr, root) in
+
+  (* Plaintext commitment *)
   let q = commit(pt, attr, root) in
 
   insert stored_keys(pkd, attr, key);
-  insert stored_ciphertexts(pkd, attr, ct);
+  insert stored_ciphertexts(pkd, attr, ct, tag);
   insert stored_commitments(pkd, attr, q);
   event AttributeEncrypted(pkd, attr, pt);
-  out(c, ct).
+  out(c, (ct, tag)).
 
 (* PKD DECRYPTION PROCESS *)
 
 let PKD_DecryptAttribute(pkd: pkd_id) =
   in(c, (attr: attribute_name, ct: ciphertext,
-         root: merkle_root));
+         tag: mac_tag, root: merkle_root));
 
   (* Check if key has been wiped *)
   get wiped_attributes(=pkd, =attr) in
@@ -127,7 +179,17 @@ let PKD_DecryptAttribute(pkd: pkd_id) =
   else
     (* Key still available *)
     get stored_keys(=pkd, =attr, key) in
-    let pt = decrypt(key, ct, attr, root) in
+
+    (* Derive keys from IKM *)
+    let aes_k = hkdf_aes(key, attr, root) in
+    let hmac_k = hkdf_hmac(key, attr, root) in
+
+    (* Verify MAC first (Encrypt-then-MAC) *)
+    if hmac_verify(hmac_k, ct, attr, root, tag) = true
+    then
+
+    (* Decrypt *)
+    let pt = aes_ctr_decrypt(aes_k, ct) in
     event AttributeDecrypted(pkd, attr, pt);
 
     (* Verify commitment *)
@@ -175,16 +237,24 @@ let Mirror_ProcessWipe(mid: mirror_id) =
 
 (* HONEST PROCESSES *)
 
-let HonestPKD(pkd: pkd_id, key: enc_key, attr: attribute_name,
-              pt: plaintext, root: merkle_root) =
-  (* Encrypt and store *)
-  let ct = encrypt(key, pt, attr, root) in
+let HonestPKD(
+  pkd: pkd_id, key: enc_key, attr: attribute_name,
+  pt: plaintext, root: merkle_root
+) =
+  (* Derive keys *)
+  let aes_k = hkdf_aes(key, attr, root) in
+  let hmac_k = hkdf_hmac(key, attr, root) in
+
+  (* Encrypt and MAC *)
+  let ct = aes_ctr_encrypt(aes_k, pt) in
+  let tag = hmac_sha512(hmac_k, ct, attr, root) in
   let q = commit(pt, attr, root) in
+
   insert stored_keys(pkd, attr, key);
-  insert stored_ciphertexts(pkd, attr, ct);
+  insert stored_ciphertexts(pkd, attr, ct, tag);
   insert stored_commitments(pkd, attr, q);
   event AttributeEncrypted(pkd, attr, pt);
-  out(c, ct).
+  out(c, (ct, tag)).
 
 (* MAIN PROCESS *)
 

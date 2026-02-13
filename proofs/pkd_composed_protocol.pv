@@ -1,0 +1,317 @@
+(*= https://raw.githubusercontent.com/fedi-e2ee/public-key-directory-specification/refs/heads/main/Specification.md#protocol-messages *)
+(*# Protocol messages that originate client-side MUST be encrypted using HPKE. *)
+
+(*= https://raw.githubusercontent.com/fedi-e2ee/public-key-directory-specification/refs/heads/main/Specification.md#encrypting-message-attributes-to-enable-crypto-shredding *)
+(*# The goal of attribute encryption is compliance, not security. *)
+
+(*
+  Composed protocol proof: combines HPKE transport encryption,
+  protocol signature verification, and attribute encryption
+  (crypto-shredding) in a single end-to-end flow.
+
+  This verifies that attributes survive the full pipeline:
+  Client → HPKE encrypt → Instance relay → PKD decrypt →
+  verify protocol sig → encrypt attribute for storage →
+  later: decrypt attribute for query responses.
+*)
+
+(* TYPE DECLARATIONS *)
+
+type actor_id.
+type server_id.
+type ed25519_public.
+type ed25519_secret.
+type signature.
+type x25519_public.
+type x25519_secret.
+type encapsulated_key.
+type hpke_ciphertext.
+type info.
+type aad.
+type key_id.
+type enc_key.                  (* IKM for attribute encryption *)
+type aes_key.
+type hmac_key.
+type attr_ciphertext.
+type mac_tag.
+type plaintext.
+type attribute_name.
+type merkle_root.
+type commitment.
+
+(* CHANNELS *)
+
+free c: channel.
+free pkd_internal: channel [private].
+
+(* CONSTANTS *)
+
+const HPKE_INFO: info.
+
+(* CRYPTOGRAPHIC FUNCTIONS *)
+
+(* Ed25519 *)
+fun ed25519_pk(ed25519_secret): ed25519_public.
+fun sign(bitstring, ed25519_secret): signature.
+reduc forall m: bitstring, sk: ed25519_secret;
+  verify(m, sign(m, sk), ed25519_pk(sk)) = true.
+
+(* X25519 + HPKE *)
+fun x25519_pk(x25519_secret): x25519_public.
+fun hpke_encap(x25519_public): encapsulated_key.
+fun hpke_seal(
+  x25519_public, bitstring, info, aad
+): hpke_ciphertext.
+reduc forall sk: x25519_secret, msg: bitstring,
+      i: info, a: aad;
+  hpke_open(
+    sk, hpke_encap(x25519_pk(sk)),
+    hpke_seal(x25519_pk(sk), msg, i, a), i, a
+  ) = msg.
+
+fun compute_key_id(x25519_public): key_id [data].
+fun aad_from_key_id(key_id): aad [data].
+
+(* Attribute encryption: HKDF + AES-CTR + HMAC-SHA512 *)
+fun hkdf_aes(enc_key, attribute_name,
+  merkle_root): aes_key.
+fun hkdf_hmac(enc_key, attribute_name,
+  merkle_root): hmac_key.
+
+fun aes_ctr_encrypt(aes_key, plaintext): attr_ciphertext.
+reduc forall k: aes_key, p: plaintext;
+  aes_ctr_decrypt(k, aes_ctr_encrypt(k, p)) = p.
+
+fun hmac_sha512(
+  hmac_key, attr_ciphertext, attribute_name, merkle_root
+): mac_tag.
+reduc forall hk: hmac_key, ct: attr_ciphertext,
+      a: attribute_name, m: merkle_root;
+  hmac_verify(
+    hk, ct, a, m, hmac_sha512(hk, ct, a, m)
+  ) = true.
+
+fun commit(
+  plaintext, attribute_name, merkle_root
+): commitment.
+
+(* Protocol message: AddKey with an attribute *)
+fun AddKeyWithAttrMsg(
+  actor_id, ed25519_public, attribute_name, plaintext
+): bitstring.
+
+(* Destructors to extract fields from message *)
+reduc forall a: actor_id, pk_val: ed25519_public,
+      attr: attribute_name, pt: plaintext;
+  extract_actor(
+    AddKeyWithAttrMsg(a, pk_val, attr, pt)
+  ) = a.
+reduc forall a: actor_id, pk_val: ed25519_public,
+      attr: attribute_name, pt: plaintext;
+  extract_attr_name(
+    AddKeyWithAttrMsg(a, pk_val, attr, pt)
+  ) = attr.
+reduc forall a: actor_id, pk_val: ed25519_public,
+      attr: attribute_name, pt: plaintext;
+  extract_attr_value(
+    AddKeyWithAttrMsg(a, pk_val, attr, pt)
+  ) = pt.
+
+(* TABLES *)
+
+table registered_keys(actor_id, ed25519_public).
+table stored_attrs(
+  actor_id, attribute_name, attr_ciphertext, mac_tag
+).
+table stored_commitments(
+  actor_id, attribute_name, commitment
+).
+table stored_attr_keys(
+  actor_id, attribute_name, enc_key
+).
+table registered_client_keys(ed25519_public).
+
+(* EVENTS *)
+
+event ClientSentMessage(
+  actor_id, attribute_name, plaintext
+).
+event PKDReceivedMessage(
+  actor_id, attribute_name, plaintext
+).
+event PKDStoredAttribute(
+  actor_id, attribute_name, plaintext
+).
+event PKDDecryptedAttribute(
+  actor_id, attribute_name, plaintext
+).
+event EndToEndIntegrity(
+  actor_id, attribute_name, plaintext
+).
+
+(* SECURITY QUERIES *)
+
+(* Query 1: Attribute plaintext confidentiality *)
+free honest_attr_value: plaintext [private].
+query attacker(honest_attr_value).
+
+(* Query 2: IKM confidentiality *)
+free honest_ikm: enc_key [private].
+query attacker(honest_ikm).
+
+(* Query 3: End-to-end integrity —
+   If PKD decrypts an attribute, client sent it *)
+query actor: actor_id, attr: attribute_name,
+      pt: plaintext;
+  event(PKDDecryptedAttribute(actor, attr, pt)) ==>
+    event(ClientSentMessage(actor, attr, pt)).
+
+(* Query 4: Stored attribute was received via HPKE *)
+query actor: actor_id, attr: attribute_name,
+      pt: plaintext;
+  event(PKDStoredAttribute(actor, attr, pt)) ==>
+    event(PKDReceivedMessage(actor, attr, pt)).
+
+(* Query 5: Ed25519 secret key secrecy *)
+free honest_client_sk: ed25519_secret [private].
+query attacker(honest_client_sk).
+
+(* CLIENT: Encrypt and send protocol message *)
+
+let Client_SendAddKeyWithAttr(
+  pkd_pk: x25519_public,
+  client_sk: ed25519_secret,
+  actor: actor_id,
+  attr_name: attribute_name,
+  attr_value: plaintext
+) =
+  let client_pk = ed25519_pk(client_sk) in
+  let msg = AddKeyWithAttrMsg(
+    actor, client_pk, attr_name, attr_value
+  ) in
+  let sig = sign(msg, client_sk) in
+
+  let kid = compute_key_id(pkd_pk) in
+  let a = aad_from_key_id(kid) in
+  let encap = hpke_encap(pkd_pk) in
+  let ct = hpke_seal(pkd_pk, msg, HPKE_INFO, a) in
+
+  event ClientSentMessage(actor, attr_name, attr_value);
+  out(c, (encap, ct, sig, client_pk)).
+
+(* PKD: Decrypt HPKE, verify sig, encrypt attribute *)
+
+let PKD_ProcessAndStore(
+  pkd_sk: x25519_secret, ikm: enc_key, root: merkle_root
+) =
+  let pkd_pk = x25519_pk(pkd_sk) in
+  let kid = compute_key_id(pkd_pk) in
+  let a = aad_from_key_id(kid) in
+
+  in(c, (encap: encapsulated_key,
+         ct: hpke_ciphertext,
+         sig: signature,
+         client_pk: ed25519_public));
+
+  (* HPKE decrypt *)
+  let msg = hpke_open(
+    pkd_sk, encap, ct, HPKE_INFO, a
+  ) in
+
+  (* Verify protocol signature *)
+  if verify(msg, sig, client_pk) = true then
+
+  (* Only process from registered clients *)
+  get registered_client_keys(=client_pk) in
+
+  (* Extract fields from decrypted message *)
+  let actor = extract_actor(msg) in
+  let attr_name = extract_attr_name(msg) in
+  let attr_value = extract_attr_value(msg) in
+
+  event PKDReceivedMessage(
+    actor, attr_name, attr_value
+  );
+
+  (* Encrypt attribute for storage *)
+  let aes_k = hkdf_aes(ikm, attr_name, root) in
+  let hmac_k = hkdf_hmac(ikm, attr_name, root) in
+  let attr_ct = aes_ctr_encrypt(aes_k, attr_value) in
+  let tag = hmac_sha512(
+    hmac_k, attr_ct, attr_name, root
+  ) in
+  let q = commit(attr_value, attr_name, root) in
+
+  insert stored_attrs(
+    actor, attr_name, attr_ct, tag
+  );
+  insert stored_commitments(actor, attr_name, q);
+  insert stored_attr_keys(actor, attr_name, ikm);
+  event PKDStoredAttribute(
+    actor, attr_name, attr_value
+  );
+  out(c, (actor, attr_name, true)).
+
+(* PKD: Decrypt stored attribute on query *)
+
+let PKD_QueryAttribute(root: merkle_root) =
+  in(c, (actor: actor_id,
+         attr_name: attribute_name));
+
+  get stored_attr_keys(=actor, =attr_name, ikm) in
+  get stored_attrs(
+    =actor, =attr_name, attr_ct, tag
+  ) in
+
+  let aes_k = hkdf_aes(ikm, attr_name, root) in
+  let hmac_k = hkdf_hmac(ikm, attr_name, root) in
+
+  if hmac_verify(
+    hmac_k, attr_ct, attr_name, root, tag
+  ) = true then
+
+  let pt = aes_ctr_decrypt(aes_k, attr_ct) in
+  event PKDDecryptedAttribute(actor, attr_name, pt);
+  event EndToEndIntegrity(actor, attr_name, pt);
+  out(pkd_internal, pt).
+
+(* MAIN PROCESS *)
+
+process
+  (* PKD keys *)
+  new pkd_x25519_sk: x25519_secret;
+  let pkd_x25519_pk = x25519_pk(pkd_x25519_sk) in
+
+  new root: merkle_root;
+
+  (* Honest client *)
+  new client_sk: ed25519_secret;
+  let client_pk = ed25519_pk(client_sk) in
+  insert registered_client_keys(client_pk);
+
+  (* Honest actor *)
+  new honest_actor: actor_id;
+  new honest_attr: attribute_name;
+
+  (* Attacker *)
+  new attacker_e_sk: ed25519_secret;
+  out(c, attacker_e_sk);
+  out(c, ed25519_pk(attacker_e_sk));
+
+  (* Public information *)
+  out(c, pkd_x25519_pk);
+  out(c, client_pk);
+  out(c, honest_actor);
+  out(c, honest_attr);
+  out(c, root);
+
+  (
+    Client_SendAddKeyWithAttr(
+      pkd_x25519_pk, client_sk, honest_actor,
+      honest_attr, honest_attr_value
+    ) |
+    !PKD_ProcessAndStore(
+      pkd_x25519_sk, honest_ikm, root
+    ) |
+    !PKD_QueryAttribute(root)
+  )

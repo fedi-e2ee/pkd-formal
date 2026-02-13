@@ -75,33 +75,19 @@ query actor: actor_id, revoke_pk: public_key, auth_pk: public_key;
   event(KeyRevoked(actor, revoke_pk)) ==>
     (auth_pk <> revoke_pk).
 
-(* PKD REVOKEKEY PROCESSING WITH INVARIANT ENFORCEMENT *)
+(* PKD REVOKEKEY PROCESSING WITH INVARIANT ENFORCEMENT
+   Unified N-key process using dynamic table lookups *)
 
-(* Process for actor with exactly one key - revocation blocked *)
-let PKD_ProcessRevokeKey_SingleKey(actor: actor_id, only_pk: public_key) =
-  in(c, (claimed_actor: actor_id, revoke_pk: public_key,
+let PKD_ProcessRevokeKey =
+  in(c, (actor: actor_id, revoke_pk: public_key,
          auth_pk: public_key, sig: signature));
 
-  if claimed_actor = actor then
-  if revoke_pk = only_pk then
-  (
-    event ActorHasSingleKey(actor);
-    event LastKeyRevocationAttempt(actor, revoke_pk);
-    event LastKeyRevocationBlocked(actor, revoke_pk);
-    out(c, (actor, revoke_pk, false))  (* Rejection signal *)
-  ).
+  let msg = RevokeKeyMsg(actor, revoke_pk) in
 
-(* Process for actor with multiple keys - revocation allowed *)
-let PKD_ProcessRevokeKey_MultipleKeys(actor: actor_id, pk1: public_key, pk2: public_key) =
-  in(c, (claimed_actor: actor_id, revoke_pk: public_key,
-         auth_pk: public_key, sig: signature));
+  (* Check: key to revoke must be registered *)
+  get registered_keys(=actor, =revoke_pk) in
 
-  let msg = RevokeKeyMsg(claimed_actor, revoke_pk) in
-
-  if claimed_actor = actor then
-  event ActorHasMultipleKeys(actor);
-
-  (* Check: Cannot revoke with the same key being revoked *)
+  (* Check: Cannot revoke with the same key *)
   if auth_pk = revoke_pk then
   (
     event SelfRevocationAttempt(actor, revoke_pk);
@@ -109,16 +95,45 @@ let PKD_ProcessRevokeKey_MultipleKeys(actor: actor_id, pk1: public_key, pk2: pub
   )
   else
   (
-    (* Verify auth_pk is one of the registered keys *)
-    if (auth_pk = pk1) || (auth_pk = pk2) then
+    (* Check: auth_pk must be registered *)
+    get registered_keys(=actor, =auth_pk) in
+
+    (* Check: auth_pk must not be revoked *)
+    get revoked_keys(=actor, =auth_pk) in
+      0  (* Auth key already revoked *)
+    else
 
     (* Verify signature *)
     if verify(msg, sig, auth_pk) = true then
-    (
-      event RevocationAuthorized(actor, revoke_pk, auth_pk);
-      event KeyRevoked(actor, revoke_pk);
-      out(c, (actor, revoke_pk, true))  (* Success signal *)
-    )
+
+    (* INVARIANT: Must have another non-revoked key
+       remaining after this revocation. Check that there
+       exists a key different from revoke_pk. *)
+    get registered_keys(=actor, remaining_pk) in
+    if remaining_pk <> revoke_pk then
+      (* Check remaining is not revoked *)
+      get revoked_keys(=actor, =remaining_pk) in
+        (* That remaining key is also revoked;
+           last key — block *)
+        event ActorHasSingleKey(actor);
+        event LastKeyRevocationAttempt(actor, revoke_pk);
+        event LastKeyRevocationBlocked(actor, revoke_pk);
+        out(c, (actor, revoke_pk, false))
+      else
+        (* At least one non-revoked key remains *)
+        event ActorHasMultipleKeys(actor);
+        event RevocationAuthorized(
+          actor, revoke_pk, auth_pk
+        );
+        insert revoked_keys(actor, revoke_pk);
+        event KeyRevoked(actor, revoke_pk);
+        out(c, (actor, revoke_pk, true))
+    else
+      (* Only found same key — single key *)
+      event ActorHasSingleKey(actor);
+      event LastKeyRevocationAttempt(actor, revoke_pk);
+      event LastKeyRevocationBlocked(actor, revoke_pk);
+      out(c, (actor, revoke_pk, false))
   ).
 
 (* HONEST ACTOR WITH SINGLE KEY *)
@@ -156,6 +171,24 @@ let HonestActorSelfRevocation(actor: actor_id, sk1: secret_key, sk2: secret_key)
   let sig = sign(msg, sk1) in  (* Signing with same key being revoked *)
   out(c, (actor, pk1, pk1, sig)).
 
+(* HONEST ACTOR WITH THREE KEYS (N-key generalization) *)
+
+let HonestActorThreeKeys(
+  actor: actor_id,
+  sk1: secret_key, sk2: secret_key, sk3: secret_key
+) =
+  let pk1 = pk(sk1) in
+  let pk2 = pk(sk2) in
+  let pk3 = pk(sk3) in
+  insert registered_keys(actor, pk1);
+  insert registered_keys(actor, pk2);
+  insert registered_keys(actor, pk3);
+
+  (* Revoke pk3 using pk1 — should succeed *)
+  let msg = RevokeKeyMsg(actor, pk3) in
+  let sig = sign(msg, sk1) in
+  out(c, (actor, pk3, pk1, sig)).
+
 (* MAIN PROCESS *)
 
 process
@@ -164,12 +197,18 @@ process
   new single_sk: secret_key;
   let single_pk = pk(single_sk) in
 
-  (* Actor with multiple keys *)
+  (* Actor with two keys *)
   new multi_key_actor: actor_id;
   new multi_sk1: secret_key;
   new multi_sk2: secret_key;
   let multi_pk1 = pk(multi_sk1) in
   let multi_pk2 = pk(multi_sk2) in
+
+  (* Actor with three keys *)
+  new triple_key_actor: actor_id;
+  new triple_sk1: secret_key;
+  new triple_sk2: secret_key;
+  new triple_sk3: secret_key;
 
   (* Attacker *)
   new attacker_sk: secret_key;
@@ -183,14 +222,19 @@ process
   out(c, multi_key_actor);
   out(c, multi_pk1);
   out(c, multi_pk2);
+  out(c, triple_key_actor);
 
   (
-    (* PKD processes *)
-    PKD_ProcessRevokeKey_SingleKey(single_key_actor, single_pk) |
-    PKD_ProcessRevokeKey_MultipleKeys(multi_key_actor, multi_pk1, multi_pk2) |
+    (* Unified PKD process *)
+    !PKD_ProcessRevokeKey |
 
     (* Honest actor scenarios *)
     HonestActorSingleKey(single_key_actor, single_sk) |
     HonestActorTwoKeys(multi_key_actor, multi_sk1, multi_sk2) |
-    HonestActorSelfRevocation(multi_key_actor, multi_sk1, multi_sk2)
+    HonestActorSelfRevocation(
+      multi_key_actor, multi_sk1, multi_sk2
+    ) |
+    HonestActorThreeKeys(
+      triple_key_actor, triple_sk1, triple_sk2, triple_sk3
+    )
   )

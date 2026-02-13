@@ -1,5 +1,8 @@
 (*= https://raw.githubusercontent.com/fedi-e2ee/public-key-directory-specification/refs/heads/main/Specification.md#burndown *)
-(*# BurnDown: Instance operator privilege to delete actor's keys *)
+(*# BurnDown: Instance operator privilege to delete actor's keys and auxiliary data *)
+
+(*= https://raw.githubusercontent.com/fedi-e2ee/public-key-directory-specification/refs/heads/main/Specification.md#burndown-validation-steps *)
+(*# BurnDown MUST atomically revoke all public keys AND auxiliary data for the Actor. *)
 
 (* TYPE DECLARATIONS *)
 
@@ -9,12 +12,20 @@ type public_key.               (* Ed25519 public key *)
 type secret_key.               (* Ed25519 secret key *)
 type signature.                (* Ed25519 signature *)
 type message.                  (* Protocol messages *)
-type totp_code.                (* TOTP 6-digit code *)
+type totp_code.                (* TOTP 8-digit code *)
+type totp_key.                 (* 256-bit TOTP shared secret *)
+type time_window.              (* 30-second time window *)
+type aux_type.                 (* Auxiliary data extension type *)
+type aux_id.                   (* Auxiliary data identifier *)
+type aux_data.                 (* Auxiliary data content *)
 
 (* CHANNELS *)
 
 free c: channel.               (* Public network channel *)
 free pkd_internal: channel [private].  (* Internal PKD state *)
+(* Spec: BurnDown is NOT HPKE-encrypted; uses
+   separate operator API *)
+free burndown_api: channel.    (* Operator-facing API *)
 
 (* CRYPTOGRAPHIC FUNCTIONS *)
 
@@ -29,17 +40,21 @@ fun BurnDownMsg(actor_id): message.
 fun FireproofMsg(actor_id): message.
 fun UndoFireproofMsg(actor_id): message.
 
-(* --- TOTP --- *)
-fun generate_totp(secret_key, bitstring): totp_code.
-reduc forall sk: secret_key, timestamp: bitstring;
-  verify_totp(generate_totp(sk, timestamp), sk, timestamp) = true.
+(* --- TOTP (spec: SHA-512, 8 digits, 30s window) --- *)
+fun totp_generate(totp_key, time_window): totp_code.
+reduc forall s: totp_key, tw: time_window;
+  totp_verify(totp_generate(s, tw), s, tw) = true.
+
+fun prev_window(time_window): time_window.
 
 (* TABLES FOR STATE TRACKING *)
 
 table registered_keys(actor_id, public_key).
 table fireproof_actors(actor_id).
-table totp_enrolled(actor_id).
+table totp_secrets(server_id, totp_key).
 table actor_servers(actor_id, server_id).
+table auxiliary_data(actor_id, aux_type, aux_id, aux_data).
+table revoked_aux_data(actor_id, aux_id).
 
 (* EVENTS FOR SECURITY PROPERTIES *)
 
@@ -47,12 +62,14 @@ event BurnDownAccepted(actor_id).
 event BurnDownRejected(actor_id).
 event FireproofSet(actor_id).
 event UndoFireproofSet(actor_id).
-event TOTPVerified(actor_id).
-event TOTPEnrolled(actor_id).
+event TOTPVerified(server_id, totp_code).
+event TOTPEnrolled(server_id, totp_key).
 event SignedByActor(actor_id, secret_key).
 event SignedByOperator(server_id, actor_id).
 event AllKeysDeleted(actor_id).
+event AllAuxDataRevoked(actor_id).
 event ActorHasKeys(actor_id).
+event ActorHasAuxData(actor_id, aux_id).
 
 (* SECURITY QUERIES *)
 
@@ -62,16 +79,20 @@ query actor: actor_id, server: server_id;
   event(BurnDownAccepted(actor)) ==>
     event(SignedByOperator(server, actor)).
 
-(* --- Query 2: Fireproof and BurnDown are mutually exclusive ---
-   If Fireproof is set, BurnDown attempt is either rejected or Fireproof was undone *)
-(* Note: This property is enforced by PKD logic but difficult to express in ProVerif *)
-(* The key security property is that BurnDown requires operator signature (Query 1) *)
+(* --- Query 2: BurnDown Revokes Auxiliary Data ---
+   When BurnDown is accepted, all auxiliary data must also be revoked.
+   This models the spec's atomicity requirement: keys AND aux data. *)
+query actor: actor_id;
+  event(BurnDownAccepted(actor)) ==>
+    event(AllAuxDataRevoked(actor)).
 
 (* --- Query 3: TOTP Required When Configured ---
    If TOTP is enrolled and BurnDown accepted, TOTP was verified *)
-query actor: actor_id;
-  (event(TOTPEnrolled(actor)) && event(BurnDownAccepted(actor))) ==>
-    event(TOTPVerified(actor)).
+query server: server_id, tkey: totp_key,
+      code: totp_code, actor: actor_id;
+  (event(TOTPEnrolled(server, tkey)) &&
+   event(BurnDownAccepted(actor))) ==>
+    event(TOTPVerified(server, code)).
 
 (* --- Query 4: Actor Cannot Self-BurnDown ---
    Actor's signature should not directly cause BurnDown *)
@@ -81,8 +102,12 @@ query event(BurnDownAccepted(honest_actor)) && event(SignedByActor(honest_actor,
 
 (* PKD BURNDOWN PROCESSING *)
 
+(* Spec: BurnDown is NOT HPKE-encrypted; arrives via
+   operator API, not the normal protocol message channel *)
 let PKD_ProcessBurnDown =
-  in(c, (actor: actor_id, server: server_id, sig: signature, server_pk: public_key, totp_opt: totp_code));
+  in(burndown_api, (actor: actor_id, server: server_id,
+    sig: signature, server_pk: public_key,
+    totp_opt: totp_code, tw: time_window));
 
   let msg = BurnDownMsg(actor) in
 
@@ -100,25 +125,71 @@ let PKD_ProcessBurnDown =
     0
   else
     (* Not Fireproof, check TOTP if enrolled *)
-    get totp_enrolled(=actor) in
-      (* TOTP is enrolled - verify code *)
-      event TOTPEnrolled(actor);
-      get registered_keys(=actor, actor_pk) in
-        (* Derive actor's secret key for TOTP (in reality, stored separately) *)
-        (* For modeling: we'll accept any valid TOTP *)
-        event TOTPVerified(actor);
+    get totp_secrets(=server, tkey) in
+      (* TOTP enrolled — actually verify the code *)
+      event TOTPEnrolled(server, tkey);
 
-        (* Proceed with BurnDown *)
-        event BurnDownAccepted(actor);
+      (* Try current window *)
+      if totp_verify(totp_opt, tkey, tw) = true then
+        event TOTPVerified(server, totp_opt);
+
+        (* REQUIREMENT 3: Atomically revoke keys+aux *)
         event AllKeysDeleted(actor);
-        out(c, (actor, server))
+        get auxiliary_data(=actor, atype, aid, adata) in
+          insert revoked_aux_data(actor, aid);
+          event AllAuxDataRevoked(actor);
+          event BurnDownAccepted(actor);
+          out(c, (actor, server))
+        else
+          event AllAuxDataRevoked(actor);
+          event BurnDownAccepted(actor);
+          out(c, (actor, server))
       else
-        0  (* No keys to delete *)
+        (* Try t-1 window *)
+        let tw1 = prev_window(tw) in
+        if totp_verify(totp_opt, tkey, tw1) = true then
+          event TOTPVerified(server, totp_opt);
+
+          event AllKeysDeleted(actor);
+          get auxiliary_data(=actor, atype, aid, adata) in
+            insert revoked_aux_data(actor, aid);
+            event AllAuxDataRevoked(actor);
+            event BurnDownAccepted(actor);
+            out(c, (actor, server))
+          else
+            event AllAuxDataRevoked(actor);
+            event BurnDownAccepted(actor);
+            out(c, (actor, server))
+        else
+          (* Try t-2 per RFC 6238 §5.2 *)
+          let tw2 = prev_window(tw1) in
+          if totp_verify(totp_opt, tkey, tw2) = true then
+            event TOTPVerified(server, totp_opt);
+
+            event AllKeysDeleted(actor);
+            get auxiliary_data(=actor, atype, aid, adata) in
+              insert revoked_aux_data(actor, aid);
+              event AllAuxDataRevoked(actor);
+              event BurnDownAccepted(actor);
+              out(c, (actor, server))
+            else
+              event AllAuxDataRevoked(actor);
+              event BurnDownAccepted(actor);
+              out(c, (actor, server))
+          else
+            0  (* TOTP verification failed *)
     else
       (* TOTP not enrolled, proceed with BurnDown *)
-      event BurnDownAccepted(actor);
       event AllKeysDeleted(actor);
-      out(c, (actor, server))
+      get auxiliary_data(=actor, atype, aid, adata) in
+        insert revoked_aux_data(actor, aid);
+        event AllAuxDataRevoked(actor);
+        event BurnDownAccepted(actor);
+        out(c, (actor, server))
+      else
+        event AllAuxDataRevoked(actor);
+        event BurnDownAccepted(actor);
+        out(c, (actor, server))
   else
     0  (* Server mismatch *)
   else
@@ -157,11 +228,17 @@ let PKD_ProcessUndoFireproof =
 
 (* HONEST SCENARIOS *)
 
-(* Honest actor sets Fireproof *)
-let HonestActorSetFireproof(actor: actor_id, actor_sk: secret_key) =
+(* Honest actor sets Fireproof and has auxiliary data *)
+let HonestActorSetFireproof(actor: actor_id, actor_sk: secret_key,
+                             atype: aux_type, aid: aux_id,
+                             adata: aux_data) =
   let actor_pk = pk(actor_sk) in
   insert registered_keys(actor, actor_pk);
   event ActorHasKeys(actor);
+
+  (* Actor has auxiliary data *)
+  insert auxiliary_data(actor, atype, aid, adata);
+  event ActorHasAuxData(actor, aid);
 
   (* Sign Fireproof message *)
   let msg = FireproofMsg(actor) in
@@ -170,25 +247,35 @@ let HonestActorSetFireproof(actor: actor_id, actor_sk: secret_key) =
   event SignedByActor(actor, actor_sk);
   out(c, (actor, sig, actor_pk)).
 
-(* Instance operator issues BurnDown *)
-let OperatorBurnDown(actor: actor_id, server: server_id, operator_sk: secret_key) =
+(* Instance operator issues BurnDown via operator API *)
+let OperatorBurnDown(
+  actor: actor_id, server: server_id,
+  operator_sk: secret_key, tkey: totp_key
+) =
   let operator_pk = pk(operator_sk) in
   insert actor_servers(actor, server);
+  insert totp_secrets(server, tkey);
+  event TOTPEnrolled(server, tkey);
 
   (* Sign BurnDown message *)
   let msg = BurnDownMsg(actor) in
   let sig = sign(msg, operator_sk) in
 
-  (* Generate TOTP (if needed) *)
-  new timestamp: bitstring;
-  let totp = generate_totp(operator_sk, timestamp) in
+  (* Generate real TOTP code *)
+  new tw: time_window;
+  let totp = totp_generate(tkey, tw) in
 
-  out(c, (actor, server, sig, operator_pk, totp)).
+  (* BurnDown goes via operator API, not HPKE channel *)
+  out(burndown_api,
+    (actor, server, sig, operator_pk, totp, tw)).
 
 (* ATTACKER SCENARIOS *)
 
 (* Actor tries to burn down their own account *)
-let ActorSelfBurnDown(actor: actor_id, server: server_id, actor_sk: secret_key) =
+let ActorSelfBurnDown(
+  actor: actor_id, server: server_id,
+  actor_sk: secret_key
+) =
   let actor_pk = pk(actor_sk) in
   insert registered_keys(actor, actor_pk);
   insert actor_servers(actor, server);
@@ -199,15 +286,19 @@ let ActorSelfBurnDown(actor: actor_id, server: server_id, actor_sk: secret_key) 
 
   event SignedByActor(actor, actor_sk);
 
-  (* Generate fake TOTP *)
-  new timestamp: bitstring;
-  let totp = generate_totp(actor_sk, timestamp) in
+  (* Attacker generates fake TOTP with unknown key *)
+  new fake_tkey: totp_key;
+  new tw: time_window;
+  let totp = totp_generate(fake_tkey, tw) in
 
-  out(c, (actor, server, sig, actor_pk, totp)).
+  out(burndown_api,
+    (actor, server, sig, actor_pk, totp, tw)).
 
 (* Attacker tries to burn down Fireproof actor *)
-let AttackerBurnDownFireproof(actor: actor_id, server: server_id,
-                                operator_sk: secret_key, actor_sk: secret_key) =
+let AttackerBurnDownFireproof(
+  actor: actor_id, server: server_id,
+  operator_sk: secret_key, actor_sk: secret_key
+) =
   let actor_pk = pk(actor_sk) in
   let operator_pk = pk(operator_sk) in
 
@@ -221,10 +312,12 @@ let AttackerBurnDownFireproof(actor: actor_id, server: server_id,
   let msg = BurnDownMsg(actor) in
   let sig = sign(msg, operator_sk) in
 
-  new timestamp: bitstring;
-  let totp = generate_totp(operator_sk, timestamp) in
+  new fake_tkey: totp_key;
+  new tw: time_window;
+  let totp = totp_generate(fake_tkey, tw) in
 
-  out(c, (actor, server, sig, operator_pk, totp)).
+  out(burndown_api,
+    (actor, server, sig, operator_pk, totp, tw)).
 
 (* MAIN PROCESS *)
 
@@ -237,11 +330,24 @@ process
   (* Create operator *)
   new operator_server: server_id;
   new operator_sk: secret_key;
+  new operator_totp_key: totp_key;
 
   (* Create attacker *)
   new attacker_actor: actor_id;
   new attacker_sk: secret_key;
   new attacker_server: server_id;
+
+  (* Auxiliary data for honest actor *)
+  new honest_aux_type: aux_type;
+  new honest_aux_id: aux_id;
+  new honest_aux_data: aux_data;
+
+  (* Aux data for BurnDown target *)
+  new target_aux_type: aux_type;
+  new target_aux_id: aux_id;
+  new target_aux_data: aux_data;
+  insert auxiliary_data(honest_actor_id, target_aux_type,
+                        target_aux_id, target_aux_data);
 
   out(c, honest_actor_id);
   out(c, attacker_actor);
@@ -255,10 +361,15 @@ process
     !PKD_ProcessUndoFireproof |
 
     (* Honest scenarios *)
-    HonestActorSetFireproof(honest_actor, honest_sk) |
-    OperatorBurnDown(honest_actor_id, honest_server, operator_sk) |
+    HonestActorSetFireproof(honest_actor, honest_sk,
+                             honest_aux_type, honest_aux_id,
+                             honest_aux_data) |
+    OperatorBurnDown(honest_actor_id, honest_server,
+                     operator_sk, operator_totp_key) |
 
     (* Attacker scenarios *)
-    !ActorSelfBurnDown(attacker_actor, attacker_server, attacker_sk) |
-    !AttackerBurnDownFireproof(honest_actor, honest_server, operator_sk, honest_sk)
+    !ActorSelfBurnDown(attacker_actor, attacker_server,
+                        attacker_sk) |
+    !AttackerBurnDownFireproof(honest_actor, honest_server,
+                                operator_sk, honest_sk)
   )

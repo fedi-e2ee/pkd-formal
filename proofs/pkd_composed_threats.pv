@@ -52,6 +52,10 @@ fun FireproofMsg(actor_id): message.
 table registered_keys(actor_id, public_key).
 table fireproof_actors(actor_id).
 table actor_servers(actor_id, server_id).
+(* Yvonne DB-tamper tracking (ProVerif tables are
+   append-only, so we track tampering separately) *)
+table db_tampered_fireproof(actor_id).
+table db_inserted_keys(actor_id, public_key).
 
 (* EVENTS FOR SECURITY PROPERTIES *)
 
@@ -66,6 +70,10 @@ event MalloryXanderAttack(actor_id).
 event AttackerKeyAccepted(actor_id, public_key).
 event HonestActorProtected(actor_id).
 event HPKEDecrypted(message).
+(* Yvonne-specific events *)
+event YvonneTamperedFireproof(actor_id).
+event YvonneInsertedKey(actor_id, public_key).
+event YvonneBurnDownAfterTamper(actor_id).
 
 (* SECURITY QUERIES *)
 
@@ -99,6 +107,17 @@ query actor: actor_id, old_pk: public_key,
    Honest actor's secret key remains confidential *)
 free honest_actor_sk: secret_key [private].
 query attacker(honest_actor_sk).
+
+(* --- Query 6: Yvonne Can Bypass Fireproof via DB ---
+   Yvonne with DB access can tamper with Fireproof flag.
+   Expected: reachable (demonstrates the threat). *)
+query actor: actor_id;
+  event(YvonneBurnDownAfterTamper(actor)) ==> true.
+
+(* --- Query 7: Yvonne Can Insert Keys via DB ---
+   Expected: reachable (demonstrates the threat). *)
+query actor: actor_id, atk_pk: public_key;
+  event(YvonneInsertedKey(actor, atk_pk)) ==> true.
 
 (* PKD PROCESSES *)
 
@@ -194,6 +213,50 @@ let MalloryXander(target: actor_id,
   (* Without PKD's HPKE secret key, they cannot decrypt *)
   event MalloryXanderAttack(target).
 
+(* THREAT SCENARIO 4: Yvonne database manipulation
+   Yvonne has privileged access to the PKD database.
+   She can tamper with Fireproof flags and insert keys. *)
+
+let Yvonne_TamperFireproof(target: actor_id) =
+  (* Yvonne removes Fireproof flag via direct DB access.
+     ProVerif tables are append-only, so we model this by
+     marking the actor as tampered. The modified BurnDown
+     process checks this flag. *)
+  insert db_tampered_fireproof(target);
+  event YvonneTamperedFireproof(target).
+
+let Yvonne_InsertKey(
+  target: actor_id, yvonne_sk: secret_key
+) =
+  let yvonne_pk = pk(yvonne_sk) in
+  (* Yvonne inserts attacker-controlled key directly *)
+  insert registered_keys(target, yvonne_pk);
+  insert db_inserted_keys(target, yvonne_pk);
+  event YvonneInsertedKey(target, yvonne_pk).
+
+(* Modified BurnDown that checks for Yvonne's DB tamper *)
+let PKD_ProcessBurnDown_WithYvonne =
+  in(c, (actor: actor_id, server: server_id,
+         operator_pk: public_key, sig: signature));
+
+  let msg = BurnDownMsg(actor) in
+  if verify_sig(msg, sig, operator_pk) = true then
+  get actor_servers(=actor, =server) in
+
+  (* Check if Yvonne tampered with Fireproof *)
+  get db_tampered_fireproof(=actor) in
+    (* Yvonne removed Fireproof — BurnDown proceeds *)
+    event YvonneBurnDownAfterTamper(actor);
+    event BurnDownAttempted(actor);
+    out(c, (actor, true))
+  else
+    (* Normal Fireproof check *)
+    get fireproof_actors(=actor) in
+      event BurnDownBlocked(actor)
+    else
+      event BurnDownAttempted(actor);
+      out(c, (actor, true)).
+
 (* HONEST ACTOR SETUP *)
 
 let HonestActor(actor: actor_id, sk: secret_key) =
@@ -223,6 +286,11 @@ process
   let richard_pk = pk(richard_sk) in
   new richard_server: server_id;
 
+  (* Yvonne (privileged PKD access) *)
+  new yvonne_sk: secret_key;
+  out(c, yvonne_sk);
+  out(c, pk(yvonne_sk));
+
   (* Xander (exploited instance) *)
   new xander_sk: secret_key;
   out(c, xander_sk);
@@ -245,8 +313,15 @@ process
     (* Honest actor *)
     HonestActor(honest_actor, honest_sk) |
 
+    (* BurnDown with Yvonne tamper check *)
+    !PKD_ProcessBurnDown_WithYvonne |
+
     (* Threat scenarios *)
     RichardYvonne(honest_actor, richard_server, richard_sk) |
     GraceRichard(honest_actor, richard_server, richard_sk) |
-    MalloryXander(honest_actor, pkd_hpke_pk, xander_sk)
+    MalloryXander(honest_actor, pkd_hpke_pk, xander_sk) |
+
+    (* Yvonne DB manipulation *)
+    Yvonne_TamperFireproof(honest_actor) |
+    Yvonne_InsertKey(honest_actor, yvonne_sk)
   )
