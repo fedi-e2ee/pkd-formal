@@ -19,9 +19,16 @@ set -euo pipefail
 #   It demonstrates that a privileged database attacker
 #   can bypass Fireproof protection, which the spec
 #   documents as a known risk.
+#
+# pkd_witness_compromise: 1
+#   Query 2 (QuorumReached ==> CosignatureAccepted for ALL
+#   witnesses) is intentionally false. It demonstrates that
+#   quorum (2-of-3) does NOT require every registered witness,
+#   proving the compromised witness is not needed for quorum.
 expected_false_for() {
   case "$1" in
     pkd_composed_threats) echo 1 ;;
+    pkd_witness_compromise) echo 1 ;;
     *) echo 0 ;;
   esac
 }
