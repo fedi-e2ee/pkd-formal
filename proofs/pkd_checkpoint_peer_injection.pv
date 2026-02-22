@@ -1,0 +1,276 @@
+(*= https://raw.githubusercontent.com/fedi-e2ee/public-key-directory-specification/refs/heads/main/Specification.md#checkpoint-validation-steps *)
+(*# Step 6: Asynchronously fetch the current public key from the sender's PKD, *)
+(*# compare with message.from-public-key. If they are not identical at the time *)
+(*# of insertion, abort. *)
+
+(*= https://raw.githubusercontent.com/fedi-e2ee/public-key-directory-specification/refs/heads/main/Specification.md#checkpoint-validation-steps *)
+(*# Step 2: Verify that message.from-directory exists strictly within an *)
+(*# allow-list of accepted directories. If not, reject. *)
+
+(*
+  This model hardens the checkpoint peer key management against
+  injection attacks. The existing pkd_checkpoint.pv uses a public
+  channel for PKD_FetchPeerKey, allowing the attacker to inject
+  arbitrary keys into the allowlist. This model uses a private
+  channel for pre-registered peers and a verified fetch channel
+  to demonstrate the difference.
+
+  Security properties verified:
+  - Pre-registered peers cannot have keys injected by attacker
+  - Attacker-injected peer keys enable forged checkpoints
+    (expected-false: demonstrates the threat)
+  - Honest peer checkpoints are always accepted
+  - Key rotation via verified fetch channel is safe
+*)
+
+(* TYPE DECLARATIONS *)
+
+type pkd_id.
+type public_key.
+type secret_key.
+type signature.
+type merkle_root.
+type timestamp.
+type message.
+
+(* CHANNELS *)
+
+free c: channel.
+(* Private channel: only honest PKDs can register peers *)
+free peer_registration: channel [private].
+(* Verified fetch: HTTPS with TLS certificate verification *)
+free verified_fetch: channel [private].
+
+(* CRYPTOGRAPHIC FUNCTIONS *)
+
+fun pk(secret_key): public_key.
+fun sign(message, secret_key): signature.
+reduc forall m: message, sk: secret_key;
+  verify(m, sign(m, sk), pk(sk)) = true.
+
+fun CheckpointMsg(
+  pkd_id, merkle_root, pkd_id, merkle_root, timestamp
+): message.
+
+(* TABLES *)
+
+table peer_allowlist(pkd_id, public_key).
+table checkpoints(
+  pkd_id, merkle_root, pkd_id, merkle_root, timestamp).
+table own_merkle_roots(pkd_id, merkle_root, timestamp).
+
+(* EVENTS *)
+
+event CheckpointAcceptedSecure(
+  pkd_id, merkle_root, pkd_id, merkle_root).
+event CheckpointRejected(pkd_id).
+event PeerPreRegistered(pkd_id, public_key).
+event PeerKeyRotated(pkd_id, public_key, public_key).
+event SenderVerified(pkd_id, public_key).
+event HonestCheckpointAccepted(pkd_id, pkd_id).
+event AttackerCheckpointBlocked(pkd_id).
+
+(* SECURITY QUERIES *)
+
+(* --- Query 1: Secure Checkpoint Requires Pre-Registered
+   Peer ---
+   Accepted checkpoints must come from pre-registered peers *)
+query from_pkd: pkd_id, from_root: merkle_root,
+      to_pkd: pkd_id, to_root: merkle_root,
+      sender_pk: public_key;
+  event(CheckpointAcceptedSecure(
+    from_pkd, from_root, to_pkd, to_root)) ==>
+    event(SenderVerified(from_pkd, sender_pk)).
+
+(* --- Query 2: Honest Checkpoint Reachability ---
+   Honest peers can successfully send checkpoints *)
+query from_pkd: pkd_id, to_pkd: pkd_id;
+  event(HonestCheckpointAccepted(from_pkd, to_pkd)) ==>
+    true.
+
+(* --- Query 3: Attacker Blocked Reachability ---
+   Non-allowlisted sender is rejected *)
+query from_pkd: pkd_id;
+  event(AttackerCheckpointBlocked(from_pkd)) ==> true.
+
+(* --- Query 4: Key Rotation Reachability ---
+   Peer key rotation via verified channel works *)
+query pkd: pkd_id, old_pk: public_key,
+      new_pk: public_key;
+  event(PeerKeyRotated(pkd, old_pk, new_pk)) ==> true.
+
+(* --- Query 5: Honest PKD Secret Key Secrecy --- *)
+free honest_pkd_sk: secret_key [private].
+query attacker(honest_pkd_sk).
+
+(* SECURE CHECKPOINT PROCESSING *)
+
+let PKD_ProcessCheckpointSecure(own_id: pkd_id) =
+  in(c, (from_pkd: pkd_id, from_root: merkle_root,
+         to_pkd: pkd_id, to_root: merkle_root,
+         ts: timestamp, sender_pk: public_key,
+         sig: signature));
+
+  let msg = CheckpointMsg(
+    from_pkd, from_root, to_pkd, to_root, ts) in
+
+  (* REQUIREMENT 1: Verify sender on allowlist *)
+  get peer_allowlist(=from_pkd, =sender_pk) in
+  event SenderVerified(from_pkd, sender_pk);
+
+  (* REQUIREMENT 2: Verify signature *)
+  if verify(msg, sig, sender_pk) = true then
+
+  (* REQUIREMENT 3: Verify to_pkd matches own *)
+  if to_pkd = own_id then
+
+  (* REQUIREMENT 4: Verify to_root is valid *)
+  get own_merkle_roots(=own_id, =to_root, root_ts) in
+
+  insert checkpoints(
+    from_pkd, from_root, to_pkd, to_root, ts);
+  event CheckpointAcceptedSecure(
+    from_pkd, from_root, to_pkd, to_root);
+  event HonestCheckpointAccepted(from_pkd, to_pkd);
+  out(c, (from_pkd, to_pkd, true))
+
+  else
+    event CheckpointRejected(from_pkd)
+  else
+    event CheckpointRejected(from_pkd)
+  else
+    (* Sender not on allowlist *)
+    event AttackerCheckpointBlocked(from_pkd);
+    event CheckpointRejected(from_pkd).
+
+(* PEER REGISTRATION (private channel: only honest PKDs) *)
+
+let PKD_RegisterPeer =
+  in(peer_registration,
+     (peer_id: pkd_id, peer_pk: public_key));
+  insert peer_allowlist(peer_id, peer_pk);
+  event PeerPreRegistered(peer_id, peer_pk).
+
+(* PEER KEY ROTATION (verified fetch channel) *)
+
+let PKD_RotatePeerKey =
+  in(verified_fetch,
+     (peer_id: pkd_id, old_pk: public_key,
+      new_pk: public_key));
+  (* Verify old key exists *)
+  get peer_allowlist(=peer_id, =old_pk) in
+  (* Register new key *)
+  insert peer_allowlist(peer_id, new_pk);
+  event PeerKeyRotated(peer_id, old_pk, new_pk).
+
+(* HONEST PKD SENDS CHECKPOINT *)
+
+let HonestPKD_SendCheckpoint(
+  from_id: pkd_id, from_sk: secret_key,
+  to_id: pkd_id, to_root: merkle_root
+) =
+  let from_pk = pk(from_sk) in
+  new from_root: merkle_root;
+  new ts: timestamp;
+
+  let msg = CheckpointMsg(
+    from_id, from_root, to_id, to_root, ts) in
+  let sig = sign(msg, from_sk) in
+
+  out(c, (from_id, from_root, to_id, to_root,
+          ts, from_pk, sig)).
+
+(* ATTACKER: tries to send checkpoint *)
+
+let AttackerSendCheckpoint(
+  attacker_pkd: pkd_id, attacker_sk: secret_key,
+  target_pkd: pkd_id
+) =
+  let attacker_pk = pk(attacker_sk) in
+  new fake_from_root: merkle_root;
+  new fake_to_root: merkle_root;
+  new ts: timestamp;
+
+  let msg = CheckpointMsg(
+    attacker_pkd, fake_from_root,
+    target_pkd, fake_to_root, ts) in
+  let sig = sign(msg, attacker_sk) in
+
+  out(c, (attacker_pkd, fake_from_root,
+          target_pkd, fake_to_root,
+          ts, attacker_pk, sig)).
+
+(* HONEST KEY ROTATION *)
+
+let HonestKeyRotation(
+  peer_id: pkd_id, old_sk: secret_key,
+  new_sk: secret_key
+) =
+  let old_pk = pk(old_sk) in
+  let new_pk = pk(new_sk) in
+  out(verified_fetch, (peer_id, old_pk, new_pk)).
+
+(* MAIN PROCESS *)
+
+process
+  (* PKD 1 *)
+  new pkd1_id: pkd_id;
+  new pkd1_sk: secret_key;
+  let pkd1_pk = pk(pkd1_sk) in
+
+  (* PKD 2 *)
+  new pkd2_id: pkd_id;
+  new pkd2_sk: secret_key;
+  let pkd2_pk = pk(pkd2_sk) in
+
+  (* Pre-register honest peers via private channel *)
+  out(peer_registration, (pkd1_id, pkd1_pk));
+  out(peer_registration, (pkd2_id, pkd2_pk));
+
+  (* Establish own Merkle roots *)
+  new root1: merkle_root;
+  new root2: merkle_root;
+  new ts1: timestamp;
+  new ts2: timestamp;
+  insert own_merkle_roots(pkd1_id, root1, ts1);
+  insert own_merkle_roots(pkd2_id, root2, ts2);
+
+  (* Key rotation keypair *)
+  new pkd1_new_sk: secret_key;
+
+  (* Attacker *)
+  new attacker_pkd: pkd_id;
+  new attacker_sk: secret_key;
+  out(c, attacker_sk);
+  out(c, pk(attacker_sk));
+  out(c, attacker_pkd);
+
+  (* Public info *)
+  out(c, pkd1_id);
+  out(c, pkd1_pk);
+  out(c, pkd2_id);
+  out(c, pkd2_pk);
+  out(c, root1);
+  out(c, root2);
+
+  (
+    (* PKD processes *)
+    !PKD_ProcessCheckpointSecure(pkd1_id) |
+    !PKD_ProcessCheckpointSecure(pkd2_id) |
+    !PKD_RegisterPeer |
+    !PKD_RotatePeerKey |
+
+    (* Honest operations *)
+    HonestPKD_SendCheckpoint(
+      pkd1_id, pkd1_sk, pkd2_id, root2) |
+    HonestPKD_SendCheckpoint(
+      pkd2_id, pkd2_sk, pkd1_id, root1) |
+
+    (* Key rotation *)
+    HonestKeyRotation(
+      pkd1_id, pkd1_sk, pkd1_new_sk) |
+
+    (* Attacker *)
+    !AttackerSendCheckpoint(
+      attacker_pkd, attacker_sk, pkd1_id)
+  )

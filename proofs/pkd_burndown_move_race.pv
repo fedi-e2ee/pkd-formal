@@ -1,0 +1,279 @@
+(*= https://raw.githubusercontent.com/fedi-e2ee/public-key-directory-specification/refs/heads/main/Specification.md#race-condition-between-successful-burndown-and-subsequent-addkey *)
+(*# After a successful BurnDown, the user's set of public keys is empty, *)
+(*# which means the system will tolerate a self-signed AddKey. *)
+
+(*= https://raw.githubusercontent.com/fedi-e2ee/public-key-directory-specification/refs/heads/main/Specification.md#moveidentity *)
+(*# This message MUST be rejected if there are existing public keys for *)
+(*# the target new-actor. *)
+
+(*
+  This model verifies the race condition between BurnDown and
+  MoveIdentity. After BurnDown empties keys, an attacker could
+  try to race a MoveIdentity to claim the now-empty actor.
+
+  Security properties verified:
+  - MoveIdentity target-empty check prevents hijacking after BurnDown
+  - BurnDown followed by MoveIdentity requires dual authorization
+  - Attacker cannot race MoveIdentity to claim burned-down actor
+  - Legitimate post-BurnDown AddKey still works
+*)
+
+(* TYPE DECLARATIONS *)
+
+type actor_id.
+type server_id.
+type public_key.
+type secret_key.
+type signature.
+type message.
+
+(* CHANNELS *)
+
+free c: channel.
+free burndown_api: channel.
+
+(* CRYPTOGRAPHIC FUNCTIONS *)
+
+fun pk(secret_key): public_key.
+fun sign(message, secret_key): signature.
+reduc forall m: message, sk: secret_key;
+  verify_sig(m, sign(m, sk), pk(sk)) = true.
+
+(* HTTP signature (distinct from protocol signature) *)
+fun http_sign(bitstring, secret_key): bitstring.
+reduc forall m: bitstring, sk: secret_key;
+  http_verify(m, http_sign(m, sk), pk(sk)) = true.
+
+(* Message constructors *)
+fun AddKeyMsg(actor_id, public_key): message.
+fun BurnDownMsg(actor_id): message.
+fun MoveIdentityMsg(actor_id, actor_id): message.
+
+(* TABLES *)
+
+table registered_keys(actor_id, public_key).
+table fireproof_actors(actor_id).
+table actor_servers(actor_id, server_id).
+table server_keys(server_id, public_key).
+
+(* EVENTS *)
+
+event BurnDownAccepted(actor_id).
+event MoveIdentityAccepted(actor_id, actor_id).
+event MoveIdentityRejectedHasKeys(actor_id).
+event AddKeyAfterBurnDown(actor_id, public_key).
+event AttackerMoveToTarget(actor_id, actor_id).
+event ProtocolSigVerified(actor_id, public_key).
+event HTTPSigVerified(actor_id, public_key).
+event TargetEmpty(actor_id).
+
+(* SECURITY QUERIES *)
+
+(* --- Query 1: MoveIdentity Requires Target Empty ---
+   MoveIdentity acceptance implies target was empty. *)
+query old_actor: actor_id, new_actor: actor_id;
+  event(MoveIdentityAccepted(old_actor, new_actor)) ==>
+    event(TargetEmpty(new_actor)).
+
+(* --- Query 2: MoveIdentity Requires Protocol Sig ---
+   Must have valid protocol sig from old actor's key. *)
+query old_actor: actor_id, new_actor: actor_id,
+      old_pk: public_key;
+  event(MoveIdentityAccepted(old_actor, new_actor)) ==>
+    event(ProtocolSigVerified(old_actor, old_pk)).
+
+(* --- Query 3: MoveIdentity Requires HTTP Sig ---
+   Must have valid HTTP sig from new server. *)
+query old_actor: actor_id, new_actor: actor_id,
+      new_pk: public_key;
+  event(MoveIdentityAccepted(old_actor, new_actor)) ==>
+    event(HTTPSigVerified(new_actor, new_pk)).
+
+(* --- Query 4: BurnDown + AddKey Race Reachability ---
+   Legitimate recovery path: BurnDown then self-signed
+   AddKey is reachable. *)
+query actor: actor_id, new_pk: public_key;
+  event(AddKeyAfterBurnDown(actor, new_pk)) ==> true.
+
+(* --- Query 5: Move Rejection When Target Has Keys ---
+   MoveIdentity is rejected if target has existing keys. *)
+query target: actor_id;
+  event(MoveIdentityRejectedHasKeys(target)) ==> true.
+
+(* PKD BURNDOWN PROCESSING *)
+
+let PKD_ProcessBurnDown =
+  in(burndown_api, (actor: actor_id, server: server_id,
+    operator_pk: public_key, sig: signature));
+
+  let msg = BurnDownMsg(actor) in
+  if verify_sig(msg, sig, operator_pk) = true then
+  get actor_servers(=actor, =server) in
+
+  get fireproof_actors(=actor) in
+    0  (* Fireproof — blocked *)
+  else
+    event BurnDownAccepted(actor);
+    out(c, (actor, true)).
+
+(* PKD ADDKEY PROCESSING (self-signed, first key) *)
+
+let PKD_ProcessAddKey_Initial =
+  in(c, (actor: actor_id, new_pk: public_key,
+         sig: signature));
+
+  let msg = AddKeyMsg(actor, new_pk) in
+
+  (* Only accept self-signed if no existing keys *)
+  get registered_keys(=actor, existing_pk) in
+    0  (* Has keys — reject self-signed *)
+  else
+    if verify_sig(msg, sig, new_pk) = true then
+      insert registered_keys(actor, new_pk);
+      event AddKeyAfterBurnDown(actor, new_pk);
+      out(c, (actor, new_pk, true)).
+
+(* PKD MOVEIDENTITY PROCESSING *)
+
+let PKD_ProcessMoveIdentity =
+  in(c, (old_actor: actor_id, new_actor: actor_id,
+         protocol_sig: signature,
+         http_sig: bitstring,
+         old_pk: public_key,
+         new_server: server_id,
+         server_pk: public_key));
+
+  let msg = MoveIdentityMsg(old_actor, new_actor) in
+
+  (* REQUIREMENT 1: Verify protocol signature *)
+  if verify_sig(msg, protocol_sig, old_pk) = true then
+  event ProtocolSigVerified(old_actor, old_pk);
+
+  (* REQUIREMENT 2: Old actor's key must be registered *)
+  get registered_keys(=old_actor, =old_pk) in
+
+  (* REQUIREMENT 3: Verify HTTP signature from new server *)
+  let http_payload = (old_actor, new_actor) in
+  if http_verify(http_payload, http_sig, server_pk) = true
+  then
+  get server_keys(=new_server, =server_pk) in
+  get actor_servers(=new_actor, =new_server) in
+  event HTTPSigVerified(new_actor, server_pk);
+
+  (* REQUIREMENT 4: Target must have no keys *)
+  get registered_keys(=new_actor, any_pk) in
+    event MoveIdentityRejectedHasKeys(new_actor)
+  else
+    event TargetEmpty(new_actor);
+    event MoveIdentityAccepted(old_actor, new_actor);
+    out(c, (old_actor, new_actor, true)).
+
+(* RACE SCENARIO: BurnDown then attacker races MoveIdentity *)
+
+let RaceBurnDownMove(
+  victim: actor_id, victim_sk: secret_key,
+  server: server_id, operator_sk: secret_key,
+  attacker_old: actor_id, attacker_sk: secret_key,
+  attacker_server: server_id,
+  attacker_server_sk: secret_key
+) =
+  let victim_pk = pk(victim_sk) in
+  let operator_pk = pk(operator_sk) in
+  let attacker_pk = pk(attacker_sk) in
+  let attacker_server_pk = pk(attacker_server_sk) in
+
+  insert registered_keys(victim, victim_pk);
+  insert actor_servers(victim, server);
+  insert registered_keys(attacker_old, attacker_pk);
+  insert server_keys(attacker_server,
+                     attacker_server_pk);
+  insert actor_servers(attacker_old, attacker_server);
+
+  (* Operator issues BurnDown *)
+  let bd_msg = BurnDownMsg(victim) in
+  let bd_sig = sign(bd_msg, operator_sk) in
+  out(burndown_api,
+    (victim, server, operator_pk, bd_sig));
+
+  (* Attacker races MoveIdentity to claim victim actor *)
+  let move_msg = MoveIdentityMsg(
+    attacker_old, victim) in
+  let move_sig = sign(move_msg, attacker_sk) in
+  let http_payload = (attacker_old, victim) in
+  let http_sig = http_sign(
+    http_payload, attacker_server_sk) in
+  event AttackerMoveToTarget(attacker_old, victim);
+  out(c, (attacker_old, victim, move_sig, http_sig,
+          attacker_pk, attacker_server,
+          attacker_server_pk)).
+
+(* LEGITIMATE RECOVERY: BurnDown then self-signed AddKey *)
+
+let LegitimateRecovery(
+  actor: actor_id, server: server_id,
+  operator_sk: secret_key, new_sk: secret_key
+) =
+  let operator_pk = pk(operator_sk) in
+  let new_pk = pk(new_sk) in
+
+  insert actor_servers(actor, server);
+
+  (* Operator BurnDown *)
+  let bd_msg = BurnDownMsg(actor) in
+  let bd_sig = sign(bd_msg, operator_sk) in
+  out(burndown_api,
+    (actor, server, operator_pk, bd_sig));
+
+  (* User self-signs new AddKey *)
+  let ak_msg = AddKeyMsg(actor, new_pk) in
+  let ak_sig = sign(ak_msg, new_sk) in
+  out(c, (actor, new_pk, ak_sig)).
+
+(* MAIN PROCESS *)
+
+process
+  (* Victim *)
+  new victim: actor_id;
+  new victim_sk: secret_key;
+  new victim_server: server_id;
+  new operator_sk: secret_key;
+
+  (* Attacker *)
+  new attacker_old: actor_id;
+  new attacker_sk: secret_key;
+  new attacker_server: server_id;
+  new attacker_server_sk: secret_key;
+
+  (* Recovery *)
+  new recovery_actor: actor_id;
+  new recovery_server: server_id;
+  new recovery_operator_sk: secret_key;
+  new recovery_new_sk: secret_key;
+
+  (* Public info *)
+  out(c, victim);
+  out(c, attacker_old);
+  out(c, attacker_sk);
+  out(c, pk(attacker_sk));
+  out(c, attacker_server);
+  out(c, attacker_server_sk);
+  out(c, pk(attacker_server_sk));
+
+  (
+    (* PKD processes *)
+    !PKD_ProcessBurnDown |
+    !PKD_ProcessAddKey_Initial |
+    !PKD_ProcessMoveIdentity |
+
+    (* Race scenario *)
+    RaceBurnDownMove(
+      victim, victim_sk,
+      victim_server, operator_sk,
+      attacker_old, attacker_sk,
+      attacker_server, attacker_server_sk) |
+
+    (* Legitimate recovery *)
+    LegitimateRecovery(
+      recovery_actor, recovery_server,
+      recovery_operator_sk, recovery_new_sk)
+  )

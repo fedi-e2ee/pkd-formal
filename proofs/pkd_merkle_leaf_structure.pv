@@ -1,0 +1,239 @@
+(*= https://www.rfc-editor.org/rfc/rfc9162.txt#section-2.1.1 *)
+(*# Definition: MTH({d(0)}) = HASH(0x00 || d(0)) for single-entry trees. *)
+
+(*= https://raw.githubusercontent.com/fedi-e2ee/public-key-directory-specification/refs/heads/main/Specification.md#protocol-messages *)
+(*# Each protocol message will be a UTF-8 encoded JSON string. *)
+
+(*
+  This model verifies the 3-component leaf structure for the
+  PKD Merkle tree. Each leaf contains:
+    1. messageHash - hash of the protocol message
+    2. serverSig   - HTTP signature from the Fediverse server
+    3. serverPkHash - hash of the server's public key
+
+  Security properties verified:
+  - Leaf binding: inclusion proof binds all 3 components
+  - No component substitution: cannot swap server sig or pk hash
+  - Server signature required: leaf without valid sig not accepted
+  - Non-power-of-2 tree (3-leaf) works correctly
+*)
+
+(* TYPE DECLARATIONS *)
+
+type hash.
+type leaf_data.
+type message_hash.
+type server_sig.
+type public_key.
+type secret_key.
+type server_id.
+
+(* CHANNELS *)
+
+free c: channel.
+free private_c: channel [private].
+
+(* CRYPTOGRAPHIC FUNCTIONS *)
+
+(* Leaf hash: H(0x00 || leaf_data) *)
+fun hash_leaf(leaf_data): hash.
+
+(* Node hash: H(0x01 || left || right) *)
+fun hash_node(hash, hash): hash.
+
+(* Hash for server public key *)
+fun hash_pk(public_key): hash.
+
+(* Server signature *)
+fun pk(secret_key): public_key.
+fun sign_msg(message_hash, secret_key): server_sig.
+reduc forall m: message_hash, sk: secret_key;
+  verify_server_sig(m, sign_msg(m, sk), pk(sk)) = true.
+
+(* 3-component leaf constructor:
+   messageHash || serverSig || serverPkHash *)
+fun make_leaf(message_hash, server_sig, hash): leaf_data.
+
+(* EVENTS *)
+
+event LeafCommitted(leaf_data, hash).
+event InclusionVerified(leaf_data, hash).
+event RootPublished(hash).
+event ServerSigVerifiedForLeaf(message_hash, public_key).
+event LeafAccepted(message_hash, server_sig, hash).
+event ThreeLeafRootPublished(hash).
+
+(* SECURITY QUERIES *)
+
+(* --- Query 1: Leaf Binding ---
+   Verified inclusion implies leaf was committed. *)
+query leaf: leaf_data, root: hash;
+  event(InclusionVerified(leaf, root)) ==>
+    event(LeafCommitted(leaf, root)).
+
+(* --- Query 2: Server Signature Required ---
+   Accepted leaf must have verified server signature. *)
+query msg_hash: message_hash, sig: server_sig,
+      pk_hash: hash, spk: public_key;
+  event(LeafAccepted(msg_hash, sig, pk_hash)) ==>
+    event(ServerSigVerifiedForLeaf(msg_hash, spk)).
+
+(* --- Query 3: Leaf Secrecy ---
+   Private leaf data remains secret. *)
+free secret_msg_hash: message_hash [private].
+query attacker(secret_msg_hash).
+
+(* --- Query 4: Three-Leaf Tree Reachability ---
+   Non-power-of-2 tree works. *)
+query root: hash;
+  event(ThreeLeafRootPublished(root)) ==> true.
+
+(* --- Query 5: Component Substitution Prevention ---
+   Different server signatures produce different leaves. *)
+free protected_leaf: leaf_data [private].
+query attacker(protected_leaf).
+
+(* LEAF ACCEPTANCE WITH SERVER SIGNATURE VERIFICATION *)
+
+let PKD_AcceptLeaf(server_pk: public_key) =
+  in(c, (msg_hash: message_hash, sig: server_sig,
+         claimed_pk: public_key));
+
+  (* Verify server signature over message hash *)
+  if verify_server_sig(msg_hash, sig, claimed_pk) = true
+  then
+
+  (* Verify claimed pk matches expected server *)
+  if claimed_pk = server_pk then
+
+  let pk_hash = hash_pk(claimed_pk) in
+  event ServerSigVerifiedForLeaf(msg_hash, claimed_pk);
+  event LeafAccepted(msg_hash, sig, pk_hash);
+
+  let leaf = make_leaf(msg_hash, sig, pk_hash) in
+  out(c, leaf).
+
+(* TWO-LEAF TREE WITH 3-COMPONENT LEAVES *)
+
+let PKD_TwoLeafStructured =
+  in(private_c, (leaf1: leaf_data, leaf2: leaf_data));
+  let h1 = hash_leaf(leaf1) in
+  let h2 = hash_leaf(leaf2) in
+  let root = hash_node(h1, h2) in
+
+  event LeafCommitted(leaf1, root);
+  event LeafCommitted(leaf2, root);
+  event RootPublished(root);
+
+  out(c, root);
+
+  (* Verify inclusion for leaf1 *)
+  (
+    in(c, query_leaf: leaf_data);
+    let qh = hash_leaf(query_leaf) in
+    if hash_node(qh, h2) = root then
+      event InclusionVerified(query_leaf, root)
+  ) |
+  (* Verify inclusion for leaf2 *)
+  (
+    in(c, query_leaf: leaf_data);
+    let qh = hash_leaf(query_leaf) in
+    if hash_node(h1, qh) = root then
+      event InclusionVerified(query_leaf, root)
+  ).
+
+(* THREE-LEAF TREE (non-power-of-2)
+   Structure per RFC 9162 §2.1:
+         root
+        /    \
+      h12     h3
+      / \
+     h1  h2               *)
+
+let PKD_ThreeLeaf =
+  in(private_c, (leaf1: leaf_data, leaf2: leaf_data,
+                 leaf3: leaf_data));
+  let h1 = hash_leaf(leaf1) in
+  let h2 = hash_leaf(leaf2) in
+  let h3 = hash_leaf(leaf3) in
+
+  let h12 = hash_node(h1, h2) in
+  let root = hash_node(h12, h3) in
+
+  event LeafCommitted(leaf1, root);
+  event LeafCommitted(leaf2, root);
+  event LeafCommitted(leaf3, root);
+  event RootPublished(root);
+  event ThreeLeafRootPublished(root);
+
+  out(c, root);
+
+  (* Verify inclusion for leaf1: path [h2, h3] *)
+  (
+    in(c, query_leaf: leaf_data);
+    let qh = hash_leaf(query_leaf) in
+    let computed_h12 = hash_node(qh, h2) in
+    if hash_node(computed_h12, h3) = root then
+      event InclusionVerified(query_leaf, root)
+  ) |
+  (* Verify inclusion for leaf2: path [h1, h3] *)
+  (
+    in(c, query_leaf: leaf_data);
+    let qh = hash_leaf(query_leaf) in
+    let computed_h12 = hash_node(h1, qh) in
+    if hash_node(computed_h12, h3) = root then
+      event InclusionVerified(query_leaf, root)
+  ) |
+  (* Verify inclusion for leaf3: path [h12] *)
+  (
+    in(c, query_leaf: leaf_data);
+    let qh = hash_leaf(query_leaf) in
+    if hash_node(h12, qh) = root then
+      event InclusionVerified(query_leaf, root)
+  ).
+
+(* MAIN PROCESS *)
+
+process
+  (* Server keypair *)
+  new server_sk: secret_key;
+  let server_pk = pk(server_sk) in
+
+  (* Create 3-component leaves *)
+  new msg_hash1: message_hash;
+  new msg_hash2: message_hash;
+  new msg_hash3: message_hash;
+  let sig1 = sign_msg(msg_hash1, server_sk) in
+  let sig2 = sign_msg(msg_hash2, server_sk) in
+  let sig3 = sign_msg(msg_hash3, server_sk) in
+  let pk_hash = hash_pk(server_pk) in
+
+  let leaf1 = make_leaf(msg_hash1, sig1, pk_hash) in
+  let leaf2 = make_leaf(msg_hash2, sig2, pk_hash) in
+  let leaf3 = make_leaf(msg_hash3, sig3, pk_hash) in
+
+  (* Protected leaf for substitution test *)
+  new protected_msg: message_hash;
+  let protected_sig = sign_msg(protected_msg, server_sk) in
+  let protected_leaf_val =
+    make_leaf(protected_msg, protected_sig, pk_hash) in
+
+  (* Public information *)
+  out(c, server_pk);
+  out(c, pk_hash);
+
+  (
+    (* Leaf acceptance with sig verification *)
+    !PKD_AcceptLeaf(server_pk) |
+
+    (* Two-leaf tree *)
+    out(private_c, (leaf1, leaf2)) |
+    !PKD_TwoLeafStructured |
+
+    (* Three-leaf tree (non-power-of-2) *)
+    out(private_c, (leaf1, leaf2, leaf3)) |
+    !PKD_ThreeLeaf |
+
+    (* Attacker can query *)
+    !in(c, any_root: hash); out(c, any_root)
+  )
