@@ -1,3 +1,7 @@
+SPECIFICATION: [Architecture](https://raw.githubusercontent.com/fedi-e2ee/public-key-directory-specification/refs/heads/main/Architecture.md)
+  SECTION: [Transparency Log](#transparency-log)
+    TEXT[!MAY]: Future versions **MAY** change the hash algorithm.
+
 SPECIFICATION: [Public Key Directory Specification](https://raw.githubusercontent.com/fedi-e2ee/public-key-directory-specification/refs/heads/main/Specification.md)
   SECTION: [Notation and Conventions](#notation-and-conventions)
     TEXT[!MUST]: The key words "**MUST**", "**MUST NOT**", "**REQUIRED**", "**SHALL**", "**SHALL NOT**", "**SHOULD**", "**SHOULD NOT**",
@@ -363,7 +367,7 @@ SPECIFICATION: [Public Key Directory Specification](https://raw.githubuserconten
     TEXT[!MAY]: Any currently acceptable HPKE algorithm **MAY** be used
     TEXT[!MAY]: if the client and server both support it.
     TEXT[!MUST]: For the current version of the protocol, clients and servers **MUST** support the
-    TEXT[!MUST]: [DHKEM(X25519, HKDF-SHA256) with HKDF-SHA256 and ChaCha20Poly1305](https://www.rfc-editor.org/rfc/rfc9180.html#name-dhkemx25519-hkdf-sha256-hkdf)
+    TEXT[!MUST]: [X-Wing](https://datatracker.ietf.org/doc/draft-connolly-cfrg-xwing-kem/), HKDF-SHA256, ChaCha20Poly1305
     TEXT[!MUST]: cipher suite.
 
   SECTION: [Recent Merkle Root Included in Plaintext Commitments](#recent-merkle-root-included-in-plaintext-commitments)
