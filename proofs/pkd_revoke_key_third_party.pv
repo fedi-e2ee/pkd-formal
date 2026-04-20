@@ -4,9 +4,9 @@
 (* TYPE DECLARATIONS *)
 
 type actor_id.                 (* Actor identifier *)
-type public_key.               (* Ed25519 public key *)
-type secret_key.               (* Ed25519 secret key *)
-type signature.                (* Ed25519 signature *)
+type public_key.               (* ML-DSA-44 public key *)
+type secret_key.               (* ML-DSA-44 secret key *)
+type signature.                (* ML-DSA-44 signature *)
 type revocation_token.         (* Revocation token = base64url(payload || sig) *)
 type message.                  (* Protocol messages *)
 type aux_type.                 (* Auxiliary data extension type *)
@@ -26,7 +26,7 @@ const REVOCATION_CONSTANT: bitstring.  (* 0xFE * 32 || "revoke-public-key" *)
 
 (* CRYPTOGRAPHIC FUNCTIONS *)
 
-(* --- Ed25519 Signatures --- *)
+(* --- ML-DSA-44 Signatures --- *)
 fun pk(secret_key): public_key.
 fun sign(bitstring, secret_key): signature.
 reduc forall m: bitstring, sk: secret_key;

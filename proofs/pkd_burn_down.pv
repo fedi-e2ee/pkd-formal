@@ -8,9 +8,9 @@
 
 type actor_id.                 (* Actor identifier *)
 type server_id.                (* Server/instance identifier *)
-type public_key.               (* Ed25519 public key *)
-type secret_key.               (* Ed25519 secret key *)
-type signature.                (* Ed25519 signature *)
+type public_key.               (* ML-DSA-44 public key *)
+type secret_key.               (* ML-DSA-44 secret key *)
+type signature.                (* ML-DSA-44 signature *)
 type message.                  (* Protocol messages *)
 type totp_code.                (* TOTP 8-digit code *)
 type totp_key.                 (* 256-bit TOTP shared secret *)
@@ -29,7 +29,7 @@ free burndown_api: channel.    (* Operator-facing API *)
 
 (* CRYPTOGRAPHIC FUNCTIONS *)
 
-(* --- Ed25519 Signatures --- *)
+(* --- ML-DSA-44 Signatures --- *)
 fun pk(secret_key): public_key.
 fun sign(message, secret_key): signature.
 reduc forall m: message, sk: secret_key;

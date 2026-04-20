@@ -8,9 +8,9 @@
 (* TYPE DECLARATIONS *)
 
 type actor_id.                 (* Actor identifier *)
-type public_key.               (* Ed25519 public key *)
-type secret_key.               (* Ed25519 secret key *)
-type signature.                (* Ed25519 signature *)
+type public_key.               (* ML-DSA-44 public key *)
+type secret_key.               (* ML-DSA-44 secret key *)
+type signature.                (* ML-DSA-44 signature *)
 type message.                  (* Protocol messages *)
 
 (* CHANNELS *)

@@ -7,9 +7,9 @@
 (* TYPE DECLARATIONS *)
 
 type actor_id.                 (* Actor identifier *)
-type public_key.               (* Ed25519 public key *)
-type secret_key.               (* Ed25519 secret key *)
-type signature.                (* Ed25519 signature *)
+type public_key.               (* ML-DSA-44 public key *)
+type secret_key.               (* ML-DSA-44 secret key *)
+type signature.                (* ML-DSA-44 signature *)
 type aux_type.                 (* Auxiliary data extension type *)
 type aux_data.                 (* Auxiliary data content *)
 type aux_id.                   (* Deterministic auxiliary data identifier *)
@@ -23,7 +23,7 @@ free pkd_internal: channel [private].  (* Internal PKD state *)
 
 (* CRYPTOGRAPHIC FUNCTIONS *)
 
-(* --- Ed25519 Signatures --- *)
+(* --- ML-DSA-44 Signatures --- *)
 fun pk(secret_key): public_key.
 fun sign(message, secret_key): signature.
 reduc forall m: message, sk: secret_key;

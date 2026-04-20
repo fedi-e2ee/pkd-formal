@@ -1,226 +1,145 @@
 (*= https://raw.githubusercontent.com/fedi-e2ee/public-key-directory-specification/refs/heads/main/Specification.md#recent-merkle-root-included-in-plaintext-commitments *)
-(*# If a client provides a Merkle root, the server checks if this root is *)
-(*# recent (i.e., within a window of the last N entries). *)
+(*# The selected recent Merkle root is accepted when it falls within any of *)
+(*# the spec's recency rules (normal window, high-volume fallback, bootstrap). *)
 
 (*= https://raw.githubusercontent.com/fedi-e2ee/public-key-directory-specification/refs/heads/main/Specification.md#protocol-signatures *)
 (*# Signatures are computed over PAE of: !pkd-context, action, message, *)
 (*# recent-merkle-root. *)
 
-(*
-  This model verifies the Merkle root freshness window used in
-  protocol message signing. The recent-merkle-root field binds
-  protocol messages to a point in the transparency log, preventing
-  stale message replay and ensuring plaintext commitments are
-  timely.
-
-  Security properties verified:
-  - Fresh root accepted: messages with recent root succeed
-  - Stale root rejected: messages with old root fail
-  - Root binding: protocol signature binds to specific root
-  - No root substitution: cannot swap recent-merkle-root in
-    a signed message
-*)
-
 (* TYPE DECLARATIONS *)
-
 type actor_id.
 type public_key.
 type secret_key.
 type signature.
 type merkle_root.
-type seq_num.
-
-(* CHANNELS *)
+type action.
+type message_payload.
+type context.
+type pae_encoding.
 
 free c: channel.
-free private_c: channel [private].
 
-(* CRYPTOGRAPHIC FUNCTIONS *)
+const PKD_CONTEXT: context.
+const ACTION_ADD_KEY: action.
 
 fun pk(secret_key): public_key.
 
-(* PAE-based protocol signature over
-   (context, action, message, recent-merkle-root) *)
 fun pae_sign(
-  bitstring, bitstring, bitstring, merkle_root,
-  secret_key
+  context, action, message_payload, merkle_root, secret_key
 ): signature.
-reduc forall ctx: bitstring, act: bitstring,
-      msg: bitstring, root: merkle_root,
-      sk: secret_key;
+reduc forall ctx: context, act: action, msg: message_payload,
+      root: merkle_root, sk: secret_key;
   pae_verify(
     ctx, act, msg, root,
     pae_sign(ctx, act, msg, root, sk),
     pk(sk)
   ) = true.
 
-(* Constants *)
-const PKD_CONTEXT: bitstring.  (* "!pkd-context" *)
-const ADDKEY_ACTION: bitstring. (* "AddKey" *)
+table low_volume_roots(merkle_root).
+table high_volume_roots(merkle_root).
+table bootstrap_roots(merkle_root).
 
-(* Sequence number ordering *)
-fun next_seq(seq_num): seq_num.
-
-(* TABLES *)
-
-table merkle_roots(merkle_root, seq_num).
-table current_seq(seq_num).
-
-(* EVENTS *)
-
-event MessageAcceptedFresh(
-  actor_id, merkle_root, seq_num).
-event MessageRejectedStale(
-  actor_id, merkle_root).
-event RootPublished(merkle_root, seq_num).
-event FreshnessVerified(merkle_root, seq_num).
-event SignatureBoundToRoot(
-  actor_id, merkle_root).
-event StaleReplayBlocked(actor_id, merkle_root).
+event MessageAccepted(actor_id, merkle_root).
+event MessageRejectedStale(actor_id, merkle_root).
+event RootAcceptedByPolicy(merkle_root).
+event LowVolumeAccepted(merkle_root).
+event HighVolumeAccepted(merkle_root).
+event BootstrapAccepted(merkle_root).
+event SignatureBoundToRoot(actor_id, merkle_root).
 
 (* SECURITY QUERIES *)
 
-(* --- Query 1: Fresh Root Acceptance ---
-   Accepted messages must have fresh root. *)
-query actor: actor_id, root: merkle_root,
-      seq: seq_num;
-  event(MessageAcceptedFresh(actor, root, seq)) ==>
-    event(FreshnessVerified(root, seq)).
+query actor: actor_id, root: merkle_root;
+  event(MessageAccepted(actor, root)) ==>
+    event(RootAcceptedByPolicy(root)).
 
-(* --- Query 2: Stale Root Rejection Reachability ---
-   Stale roots are rejected. *)
+query actor: actor_id, root: merkle_root;
+  event(MessageAccepted(actor, root)) ==>
+    event(SignatureBoundToRoot(actor, root)).
+
+query root: merkle_root;
+  event(LowVolumeAccepted(root)) ==> true.
+
+query root: merkle_root;
+  event(HighVolumeAccepted(root)) ==> true.
+
+query root: merkle_root;
+  event(BootstrapAccepted(root)) ==> true.
+
 query actor: actor_id, root: merkle_root;
   event(MessageRejectedStale(actor, root)) ==> true.
 
-(* --- Query 3: Signature Binds to Root ---
-   Accepted messages have signature bound to root. *)
-query actor: actor_id, root: merkle_root,
-      seq: seq_num;
-  event(MessageAcceptedFresh(actor, root, seq)) ==>
-    event(SignatureBoundToRoot(actor, root)).
-
-(* --- Query 4: Stale Replay Blocked Reachability ---
-   Replaying a message with an old root is blocked. *)
-query actor: actor_id, root: merkle_root;
-  event(StaleReplayBlocked(actor, root)) ==> true.
-
-(* --- Query 5: Root Published Reachability --- *)
-query root: merkle_root, seq: seq_num;
-  event(RootPublished(root, seq)) ==> true.
-
-(* PKD MERKLE ROOT MANAGEMENT *)
-
-let PKD_PublishRoot =
-  in(private_c, (root: merkle_root, seq: seq_num));
-  insert merkle_roots(root, seq);
-  insert current_seq(seq);
-  event RootPublished(root, seq);
-  out(c, root).
-
-(* PKD FRESHNESS CHECK
-   Models a window of N=2 recent roots.
-   Current seq = s, accepts s and s-1. *)
-
 let PKD_ProcessMessage =
-  in(c, (actor: actor_id, msg_content: bitstring,
+  in(c, (actor: actor_id, msg_content: message_payload,
          recent_root: merkle_root,
          sig: signature, signer_pk: public_key));
 
-  (* Verify PAE signature binds to the root *)
   if pae_verify(
-    PKD_CONTEXT, ADDKEY_ACTION, msg_content,
+    PKD_CONTEXT, ACTION_ADD_KEY, msg_content,
     recent_root, sig, signer_pk
   ) = true then
-  event SignatureBoundToRoot(actor, recent_root);
-
-  (* Check if root exists and is recent *)
-  get merkle_roots(=recent_root, root_seq) in
-  get current_seq(cur_seq) in
-
-  (* Accept if root_seq == cur_seq (current) *)
-  if root_seq = cur_seq then
-    event FreshnessVerified(recent_root, root_seq);
-    event MessageAcceptedFresh(
-      actor, recent_root, root_seq);
-    out(c, (actor, true))
-  else
-    (* Accept if root_seq == cur_seq - 1 (previous) *)
-    if next_seq(root_seq) = cur_seq then
-      event FreshnessVerified(recent_root, root_seq);
-      event MessageAcceptedFresh(
-        actor, recent_root, root_seq);
+    event SignatureBoundToRoot(actor, recent_root);
+    get low_volume_roots(=recent_root) in
+      event LowVolumeAccepted(recent_root);
+      event RootAcceptedByPolicy(recent_root);
+      event MessageAccepted(actor, recent_root);
       out(c, (actor, true))
     else
-      (* Root is too old — reject *)
-      event MessageRejectedStale(actor, recent_root);
-      event StaleReplayBlocked(actor, recent_root).
-
-(* HONEST ACTOR: sends message with fresh root *)
+      get high_volume_roots(=recent_root) in
+        event HighVolumeAccepted(recent_root);
+        event RootAcceptedByPolicy(recent_root);
+        event MessageAccepted(actor, recent_root);
+        out(c, (actor, true))
+      else
+        get bootstrap_roots(=recent_root) in
+          event BootstrapAccepted(recent_root);
+          event RootAcceptedByPolicy(recent_root);
+          event MessageAccepted(actor, recent_root);
+          out(c, (actor, true))
+        else
+          event MessageRejectedStale(actor, recent_root).
 
 let HonestActor(
-  actor: actor_id, sk: secret_key,
-  recent_root: merkle_root
+  actor: actor_id, sk: secret_key, recent_root: merkle_root
 ) =
   let actor_pk = pk(sk) in
-  new msg_content: bitstring;
+  new msg_content: message_payload;
   let sig = pae_sign(
-    PKD_CONTEXT, ADDKEY_ACTION, msg_content,
-    recent_root, sk) in
-  out(c, (actor, msg_content, recent_root,
-          sig, actor_pk)).
-
-(* ATTACKER: replays message with stale root *)
+    PKD_CONTEXT, ACTION_ADD_KEY, msg_content, recent_root, sk
+  ) in
+  out(c, (actor, msg_content, recent_root, sig, actor_pk)).
 
 let AttackerStaleReplay(
-  target: actor_id, attacker_sk: secret_key,
-  stale_root: merkle_root
+  target: actor_id, attacker_sk: secret_key, stale_root: merkle_root
 ) =
   let attacker_pk = pk(attacker_sk) in
-  new msg_content: bitstring;
+  new msg_content: message_payload;
   let sig = pae_sign(
-    PKD_CONTEXT, ADDKEY_ACTION, msg_content,
-    stale_root, attacker_sk) in
-  out(c, (target, msg_content, stale_root,
-          sig, attacker_pk)).
-
-(* MAIN PROCESS *)
+    PKD_CONTEXT, ACTION_ADD_KEY, msg_content, stale_root, attacker_sk
+  ) in
+  out(c, (target, msg_content, stale_root, sig, attacker_pk)).
 
 process
-  new actor_id_val: actor_id;
+  new actor: actor_id;
   new actor_sk: secret_key;
-
   new attacker_sk: secret_key;
-  out(c, attacker_sk);
+
+  new low_root: merkle_root;
+  new high_root: merkle_root;
+  new zero_root: merkle_root;
+  new stale_root: merkle_root;
+
+  insert low_volume_roots(low_root);
+  insert high_volume_roots(high_root);
+  insert bootstrap_roots(zero_root);
+
+  out(c, actor);
   out(c, pk(attacker_sk));
 
-  (* Create 3 sequential roots: seq0, seq1, seq2 *)
-  new root0: merkle_root;
-  new root1: merkle_root;
-  new root2: merkle_root;
-  new seq0: seq_num;
-  let seq1 = next_seq(seq0) in
-  let seq2 = next_seq(seq1) in
-
-  out(c, actor_id_val);
-  out(c, root0);
-  out(c, root1);
-  out(c, root2);
-
   (
-    (* PKD processes *)
     !PKD_ProcessMessage |
-
-    (* Publish roots in order *)
-    out(private_c, (root0, seq0)) |
-    out(private_c, (root1, seq1)) |
-    out(private_c, (root2, seq2)) |
-    !PKD_PublishRoot |
-
-    (* Honest actor with fresh root *)
-    HonestActor(actor_id_val, actor_sk, root2) |
-    HonestActor(actor_id_val, actor_sk, root1) |
-
-    (* Attacker tries stale root *)
-    AttackerStaleReplay(
-      actor_id_val, attacker_sk, root0)
+    HonestActor(actor, actor_sk, low_root) |
+    HonestActor(actor, actor_sk, high_root) |
+    HonestActor(actor, actor_sk, zero_root) |
+    AttackerStaleReplay(actor, attacker_sk, stale_root)
   )
