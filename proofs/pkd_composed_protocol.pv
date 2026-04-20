@@ -50,13 +50,14 @@ const HPKE_INFO: info.
 
 (* CRYPTOGRAPHIC FUNCTIONS *)
 
-(* Ed25519 *)
+(* ML-DSA-44 (protocol-message signing; symbolic abstraction reused
+   from the legacy ed25519_* identifiers) *)
 fun ed25519_pk(ed25519_secret): ed25519_public.
 fun sign(bitstring, ed25519_secret): signature.
 reduc forall m: bitstring, sk: ed25519_secret;
   verify(m, sign(m, sk), ed25519_pk(sk)) = true.
 
-(* X25519 + HPKE *)
+(* X-Wing (MLKEM768-X25519) + HPKE *)
 fun x25519_pk(x25519_secret): x25519_public.
 fun hpke_encap(x25519_public): encapsulated_key.
 fun hpke_seal(
@@ -172,7 +173,7 @@ query actor: actor_id, attr: attribute_name,
   event(PKDStoredAttribute(actor, attr, pt)) ==>
     event(PKDReceivedMessage(actor, attr, pt)).
 
-(* Query 5: Ed25519 secret key secrecy *)
+(* Query 5: ML-DSA-44 secret key secrecy *)
 free honest_client_sk: ed25519_secret [private].
 query attacker(honest_client_sk).
 

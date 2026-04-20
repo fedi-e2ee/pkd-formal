@@ -8,7 +8,7 @@ type action.                   (* Message type *)
 type message_payload.          (* JSON message body *)
 type merkle_root.              (* Recent Merkle root *)
 type pae_encoding.             (* PAE-encoded message *)
-type signature.                (* Ed25519 signature *)
+type signature.                (* ML-DSA-44 signature *)
 type public_key.               (* Public key *)
 type secret_key.               (* Secret key *)
 
@@ -39,7 +39,7 @@ fun pae(context, action, message_payload, merkle_root): pae_encoding [data].
 
 (* In ProVerif, constructors marked [data] are automatically injective *)
 
-(* --- Ed25519 Signatures --- *)
+(* --- ML-DSA-44 Signatures --- *)
 fun pk(secret_key): public_key.
 fun sign(pae_encoding, secret_key): signature.
 reduc forall m: pae_encoding, sk: secret_key;
